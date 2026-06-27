@@ -376,7 +376,9 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
 3. **ESG 表现** — ESG评级对比
 4. **综合建议** — 基于以上数据给出投资建议（仅供参考，不构成投资意见）
 
-用 Markdown 格式输出，语言专业但不晦涩。"""
+用 Markdown 格式输出，语言专业但不晦涩。
+
+**重要**：不要编造报告日期、分析师署名、数据来源等元信息。直接输出分析内容即可。"""
 
     response = llm.invoke([SystemMessage(content=report_prompt)])
     return response.content
