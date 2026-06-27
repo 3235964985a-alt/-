@@ -448,6 +448,7 @@ if user_input:
                 response_placeholder = st.empty()
                 current_agent = "general_agent"
                 streamed_text = ""
+                response_text = ""
 
                 for chunk in chat_stream(user_input, thread_id=st.session_state.thread_id):
                     if chunk["type"] == "agent":
@@ -513,6 +514,20 @@ if user_input:
                             "role": "assistant",
                             "content": response_text,
                             "agent": final_agent,
+                        })
+
+                    elif chunk["type"] == "debate_signal":
+                        debate_text = chunk.get("text", "")
+                        if "买入提醒" in debate_text:
+                            st.warning("  买入信号！8 Agent 辩论多数 buy 票")
+                        st.markdown('<span class="agent-badge badge-esg">  8-Agent 辩论投票</span>', unsafe_allow_html=True)
+                        st.markdown(debate_text)
+                        if response_text:
+                            response_text += f"\n\n---\n\n##  8-Agent 辩论投票\n\n{debate_text}"
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": f"【辩论投票】\n{debate_text}",
+                            "agent": "esg_agent",
                         })
 
             except Exception as e:

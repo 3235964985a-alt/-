@@ -689,8 +689,27 @@ def sector_overview_tool(dummy: str = "") -> str:
     return get_sector_overview_text()
 
 
+def _extract_stock_codes(text: str) -> list:
+    """从文本中提取6位股票代码"""
+    import re
+    codes = re.findall(r'\b(\d{6})\b', text)
+    return list(set(codes))
+
+
+def _is_buy_sell_intent(text: str) -> bool:
+    """判断用户是否在请求买卖建议"""
+    keywords = ["能不能买", "该不该买", "该不该入", "能不能入", "是否买入",
+                "是否卖出", "买入建议", "卖出建议", "可以买", "可以入",
+                "值得买", "值得入", "要不要买", "要不要卖", "该卖",
+                "投资建议", "操作建议", "仓位建议", "买卖建议",
+                "要不要入", "建仓", "减仓", "加仓", "清仓", "能买吗", "能卖吗"]
+    return any(kw in text for kw in keywords)
+
+
 def chat(message: str, thread_id: str = "default") -> Dict[str, Any]:
     """同步对话接口（带上下文记忆）
+
+    若用户请求买卖建议且含股票代码，自动触发 8-Agent 辩论投票。
 
     Args:
         message: 用户消息
@@ -702,12 +721,20 @@ def chat(message: str, thread_id: str = "default") -> Dict[str, Any]:
     graph = get_graph()
     config = {"configurable": {"thread_id": thread_id}}
 
-    # 只传当前消息，LangGraph 自动从 checkpoint 加载历史+合并
     state = {"messages": [HumanMessage(content=message)]}
 
     result = graph.invoke(state, config)
     final_msg = result["messages"][-1] if result.get("messages") else None
     response_text = final_msg.content if final_msg else "抱歉，无法处理您的请求。"
+
+    # 买卖建议 → 自动触发辩论
+    codes = _extract_stock_codes(message)
+    if codes and _is_buy_sell_intent(message):
+        try:
+            debate = debate_watchlist(codes)
+            response_text += f"\n\n---\n\n##  8-Agent 辩论投票\n\n{debate}"
+        except Exception as e:
+            logger.warning(f"辩论触发失败: {e}")
 
     return {
         "response": response_text,
@@ -725,15 +752,17 @@ async def chat_async(message: str, thread_id: str = "default") -> Dict[str, Any]
 def chat_stream(message: str, thread_id: str = "default"):
     """流式对话接口（带上下文记忆）
 
+    若用户请求买卖建议且含股票代码，流式输出结束后自动追加辩论结果。
+
     Yields:
         {"type": "agent", "name": str}  — Agent 切换
         {"type": "content", "text": str} — 内容块
         {"type": "done", "agent": str, "response": str} — 完成
+        {"type": "debate_signal", "text": str} — 辩论报告（仅买卖建议请求）
     """
     graph = get_graph()
     config = {"configurable": {"thread_id": thread_id}}
 
-    # 只传当前消息，LangGraph 自动从 checkpoint 加载历史+合并
     state = {"messages": [HumanMessage(content=message)]}
 
     last_agent = "supervisor"
@@ -759,7 +788,7 @@ def chat_stream(message: str, thread_id: str = "default"):
     if not final_text:
         final_text = "抱歉，无法处理您的请求。"
 
-    # 模拟流式逐字输出（实际生产中可用 LLM stream 替换）
+    # 模拟流式逐字输出
     import time
     chunk_size = 15
     for i in range(0, len(final_text), chunk_size):
@@ -768,3 +797,12 @@ def chat_stream(message: str, thread_id: str = "default"):
         time.sleep(0.02)
 
     yield {"type": "done", "agent": last_agent, "response": final_text}
+
+    # 买卖建议 → 自动触发辩论
+    codes = _extract_stock_codes(message)
+    if codes and _is_buy_sell_intent(message):
+        try:
+            debate = debate_watchlist(codes)
+            yield {"type": "debate_signal", "text": debate}
+        except Exception as e:
+            logger.warning(f"辩论触发失败: {e}")
