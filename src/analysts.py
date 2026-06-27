@@ -197,6 +197,7 @@ def _agent_round1(agent_def: AnalystAgent, stock_name: str, stock_code: str,
 3. 给出综合评分（-100到100，正数看好，负数看空，0中性）
 4. 投票：buy（买入）、hold（持有）、sell（卖出）三选一
 5. 用一句话说明理由
+6. **  所有数字必须来自上方提供的 MCP 实时数据，严禁使用训练知识中的历史数据**
 
 返回 JSON 格式（不要```包裹）：
 {{"score": -100到100的整数, "vote": "buy/hold/sell", "reason": "一句话理由"}}"""
@@ -315,7 +316,8 @@ def _bull_bear_debate(stock_code: str, stock_name: str, data_summary: str) -> st
 3. 估值是否提供了安全边际
 4. 任何支持看多的数据信号
 
-输出 Markdown 格式的做多报告，字数 200 字以内。"""
+输出 Markdown 格式的做多报告，字数 200 字以内。
+**  所有数据必须来自上方提供的 MCP 实时数据，严禁使用训练知识中的历史数字。**"""
 
     bear_prompt = f"""你是 Bear 研究员（空方首席），你的任务是为 {stock_name}（{stock_code}）做空辩护。
 
@@ -328,7 +330,8 @@ def _bull_bear_debate(stock_code: str, stock_name: str, data_summary: str) -> st
 3. 行业/板块下行风险
 4. 任何支持看空的数据信号
 
-输出 Markdown 格式的做空报告，字数 200 字以内。"""
+输出 Markdown 格式的做空报告，字数 200 字以内。
+**  所有数据必须来自上方提供的 MCP 实时数据，严禁使用训练知识中的历史数字。**"""
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_bull = pool.submit(lambda: llm.invoke([SystemMessage(content=bull_prompt)]))

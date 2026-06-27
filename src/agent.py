@@ -395,7 +395,9 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
 ## 5.  综合参考
 - 基于以上全部数据的投资参考（仅供参考，不构成投资意见）
 
-用 Markdown 格式输出。不要编造报告日期、分析师署名、数据来源等元信息。"""
+用 Markdown 格式输出。不要编造报告日期、分析师署名、数据来源等元信息。
+
+**  严禁编造虚构数据：所有数字（股价、市值、ROE、ROIC、毛利率、营收增长率等）必须来自上方提供的 MCP 实时数据，绝对不要使用训练知识中的历史数据。如果某指标数据缺失，明确写"暂无数据"而不是猜测。**"""
 
     response = llm.invoke([SystemMessage(content=report_prompt)])
     return response.content
@@ -462,7 +464,8 @@ def debate_watchlist(stock_codes: List[str]) -> str:
 3. 风险提示 — 潜在风险
 4. 综合建议 — 一句话建议（仅供参考）
 
-用 Markdown 输出，语言简洁。不要编造日期和分析师署名。"""
+用 Markdown 输出，语言简洁。不要编造日期和分析师署名。
+**  严禁编造数据：所有统计数字只可引用上方辩论明细中已出现的评分和票数。**"""
 
         resp = llm.invoke([SystemMessage(content=single_report_prompt)])
         text = resp.content if hasattr(resp, "content") else str(resp)
@@ -576,7 +579,9 @@ def get_market_overview() -> str:
 ## 五、市场总结与展望
 （综合个股+板块+新闻，给出一句话市场判断）
 
-输出要求：专业但不晦涩，每条数据注明来源，约300-500字。"""
+输出要求：专业但不晦涩，每条数据注明来源，约300-500字。
+
+**  严禁编造虚构数据：所有数字（价格、市值、百分比）必须来自上方提供的 MCP 实时数据，绝对不要使用训练知识中的过时数值。如某数据缺失，明确写"暂无"。**"""
 
     response = llm.invoke(prompt)
     return response.content or "无法生成大盘概览"
