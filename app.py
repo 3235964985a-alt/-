@@ -357,9 +357,6 @@ if st.session_state.get("trigger_ocr_analysis"):
             with st.spinner(f"  7-Agent 辩论中... 价值派vs成长派vs质量派..."):
                 try:
                     report = analyze_watchlist(codes)
-                    # 检测买入信号
-                    if "买入提醒" in report:
-                        st.warning("  买入信号！7 Agent 辩论多数 buy 票，详见报告")
                     st.markdown('<span class="agent-badge badge-analysis">  持仓分析报告（含辩论）</span>', unsafe_allow_html=True)
                     st.markdown(report)
                     st.session_state.messages.append({

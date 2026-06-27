@@ -375,15 +375,16 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
         text = resp.content if hasattr(resp, "content") else str(resp)
         reports.append(f"##   {name}（{code}）{signal}\n\n{text}")
 
-    # 最终汇总：每只股票独立报告 + 买入信号总结
+    # 最终汇总：每只股票独立报告
     final_report = "\n\n---\n\n".join(reports)
 
+    # 买入信号附录（报告末尾，仅供参考）
     if buy_signals:
         buy_list = ", ".join(f"**{d['stock_name']}**（{d['stock_code']}）" for d in buy_signals)
-        final_report = (
-            f">   以下股票获 7 Agent 辩论多数 buy 票：{buy_list}\n"
-            f"> 以上仅供参考，不构成投资建议。\n\n"
-            f"---\n\n{final_report}"
+        final_report += (
+            f"\n\n---\n\n"
+            f">   以上分析基于 8-Agent Bull/Bear 辩论 + 囚徒困境博弈，仅供参考，不构成投资建议。\n"
+            f"> 获 majority buy 票的股票：{buy_list}\n"
         )
 
     return final_report
