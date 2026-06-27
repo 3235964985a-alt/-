@@ -89,7 +89,7 @@ st.markdown("""
 @st.dialog("  系统说明 — 金融智能助手", width="large")
 def show_system_dialog():
     cols = st.columns(3)
-    cols[0].metric("  智能体", "12")
+    cols[0].metric("  智能体", "13")
     cols[1].metric("  MCP工具", "23")
     cols[2].metric("  数据源", "4")
 
@@ -105,7 +105,7 @@ def show_system_dialog():
     | 通用助手 | 金融知识问答 + RAG | 1 |
     """)
 
-    st.subheader("  7-Agent 辩论委员会")
+    st.subheader("  8-Agent 辩论委员会（借鉴 TradingAgents）")
     st.markdown("""
     | 分析师 | 流派 | 数据 |
     |---|---|---|
@@ -116,9 +116,10 @@ def show_system_dialog():
     | ESG分析师 | 可持续发展 | 三机构ESG |
     | 新闻猎手 | 舆情分析 | 14+新闻源情绪 |
     | 风控官·塔勒布 | 风险裁决 | 纯博弈推理 |
+    | 技术派·欧奈尔 | 趋势分析 | 概念/行业板块轮动 |
     """)
 
-    st.caption("博弈机制：Round 1 独立打分 → Round 2 囚徒困境（合作 1.5x 权重）→ buy > 50% 买入提醒")
+    st.caption("博弈机制：Round 0 Bull/Bear 对抗辩论 → Round 1 独立打分 → Round 2 囚徒困境（合作 1.5x 权重）→ 成长/价值股动态角色权重 → buy > 50% 买入提醒")
 
     st.subheader("  数据源")
     st.markdown("""

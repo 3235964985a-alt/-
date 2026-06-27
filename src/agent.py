@@ -346,9 +346,12 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
                 f"| {agent_name} | {c_flag} | {r2['vote']} | {r2['score']} | ×{fw} | {r2['reason']} |"
             )
 
-        single_report_prompt = f"""你是一位资深投资分析师。以下是 7 位分析师对 {name}({code}) 的两轮囚徒困境辩论结果：
+        single_report_prompt = f"""你是一位资深投资分析师。以下是 8 位分析师对 {name}({code}) 的辩论博弈结果：
 
 【股票类型】{type_label}（动态角色权重已调整，避免对该类型股票的系统性偏见）
+
+【Bull/Bear 对抗辩论】
+{d.get('bull_bear_debate', '')[:600]}
 
 【投票结果】
 最终得分: {d['final_score']} | 加权: buy {vs['buy_weight']}  hold {vs['hold_weight']}  sell {vs['sell_weight']}
@@ -360,10 +363,10 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
 
 【要求】仅针对 {name}({code}) 一只股票，生成分析报告：
 
-1. **辩论总结** — 7位分析师的核心分歧与共识
-2. **估值与成长** — 价值派 vs 成长派的博弈结论
+1. **辩论总结** — Bull/Bear 对抗核心分歧 + 8位分析师的共识
+2. **估值与成长** — 价值派 vs 成长派 vs 技术派的博弈结论
 3. **ESG与质量** — ESG评级和基本面质量分析
-4. **情绪与风险** — 舆情信号 + 风控官的裁决
+4. **情绪与风险** — 舆情信号 + 板块趋势 + 风控官的裁决
 5. **投票结论** — {signal if signal else "无买入信号"}，综合建议
 
 用 Markdown 输出，语言专业但不晦涩。不要编造日期和分析师署名。"""
