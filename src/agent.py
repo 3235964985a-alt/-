@@ -60,6 +60,8 @@ class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
     next_agent: str
     round_count: int
+    visited_agents: List[str]
+    analysis_chain: str  # "active"=正在执行综合分析链, ""=普通模式
 
 
 # ---------- LLM 工厂 ----------
@@ -76,6 +78,15 @@ def _create_llm(temperature: float = 0.3) -> ChatOpenAI:
     return ChatOpenAI(**kwargs)
 
 
+def _is_comprehensive_intent(decision: str) -> bool:
+    """检测 Supervisor 决策文本中是否包含综合分析意图"""
+    keywords = ["分析", "报告", "诊断", "怎么看", "全面", "综合", "buy", "sell", "买入", "卖出"]
+    has_keyword = any(k in decision for k in keywords)
+    # 如果 Supervisor 提到多个 agent → 综合分析
+    agent_mentions = sum(1 for a in ["stock_agent", "analysis_agent", "esg_agent", "news_agent"] if a in decision)
+    return has_keyword or agent_mentions >= 2
+
+
 # ---------- Supervisor ----------
 
 def create_supervisor_node():
@@ -86,6 +97,19 @@ def create_supervisor_node():
     def supervisor_node(state: AgentState) -> Dict[str, Any]:
         messages = list(state.get("messages", []))
         round_count = state.get("round_count", 0)
+        visited = list(state.get("visited_agents", []))
+        analysis_chain = state.get("analysis_chain", "")
+
+        # 综合分析链在跑 → 强制按序路由
+        CHAIN_ORDER = ["stock_agent", "analysis_agent", "esg_agent", "news_agent"]
+        if analysis_chain == "active":
+            for next_agent in CHAIN_ORDER:
+                if next_agent not in visited:
+                    logger.info(f"综合分析链 → {next_agent}")
+                    return {"next_agent": next_agent, "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": "active"}
+            # 所有Agent都跑完了
+            logger.info("综合分析链完成 → finish_agent")
+            return {"next_agent": "finish_agent", "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": ""}
 
         # 构造路由决策消息——保留最近20条让 Supervisor 有足够上下文
         system_msg = SystemMessage(content=SUPERVISOR_PROMPT)
@@ -98,29 +122,28 @@ def create_supervisor_node():
         # 防死循环：最多3轮
         if round_count >= 3:
             logger.info(f"Supervisor 达到最大轮次 → finish_agent")
-            return {"next_agent": "finish_agent", "round_count": round_count + 1}
+            return {"next_agent": "finish_agent", "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": ""}
 
         # 第1轮之后，Supervisor 可以决定 FINISH
         if round_count >= 1:
             if "finish" in decision or "summary" in decision or "总结" in decision:
                 logger.info(f"Supervisor 决定汇总 → finish_agent")
-                return {"next_agent": "finish_agent", "round_count": round_count + 1}
+                return {"next_agent": "finish_agent", "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": ""}
+
+        # 检测综合分析意图 → 启动分析链
+        if _is_comprehensive_intent(decision):
+            logger.info(f"Supervisor 检测到综合分析意图 → 启动分析链 stock_agent")
+            return {"next_agent": "stock_agent", "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": "active"}
 
         # 解析并规范化决策
         for agent_name in ["stock_agent", "analysis_agent", "esg_agent", "news_agent", "general_agent"]:
             if agent_name in decision:
                 logger.info(f"Supervisor路由 → {agent_name}")
-                return {
-                    "next_agent": agent_name,
-                    "round_count": round_count + 1,
-                }
+                return {"next_agent": agent_name, "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": ""}
 
         # 默认走通用Agent
         logger.info(f"Supervisor路由 → general_agent (fallback, decision={decision})")
-        return {
-            "next_agent": "general_agent",
-            "round_count": round_count + 1,
-        }
+        return {"next_agent": "general_agent", "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": ""}
 
     return supervisor_node
 
@@ -207,10 +230,16 @@ def _create_worker_node(
             final_msgs = [system_msg] + filtered + [response] + tool_messages
             final_response = llm.invoke(final_msgs)
             logger.info(f"{agent_name} 生成回复 ({'含' if tool_messages else '无'}工具调用)")
-            return {"messages": [final_response], "next_agent": END}
+            visited = list(state.get("visited_agents", []))
+            if agent_name not in visited:
+                visited.append(agent_name)
+            return {"messages": [final_response], "next_agent": END, "visited_agents": visited}
 
         logger.info(f"{agent_name} 直接回复")
-        return {"messages": [response], "next_agent": END}
+        visited = list(state.get("visited_agents", []))
+        if agent_name not in visited:
+            visited.append(agent_name)
+        return {"messages": [response], "next_agent": END, "visited_agents": visited}
 
     return worker_node
 
