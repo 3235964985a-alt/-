@@ -14,7 +14,7 @@ from datetime import datetime
 # 添加src到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.agent import chat
+from src.agent import chat, analyze_watchlist
 
 
 # ---------- 页面配置 ----------
@@ -106,6 +106,53 @@ with st.sidebar:
     - ** ESG评级专家** — 三大机构ESG评级
     - ** 通用助手** — 金融知识问答 + RAG
     """)
+
+    st.markdown("---")
+
+    st.markdown("###  自选股管理")
+
+    # 初始化自选股状态
+    if "watchlist" not in st.session_state:
+        st.session_state.watchlist = {}  # {组名: [股票代码列表]}
+
+    # 添加自选股
+    with st.expander("➕ 添加自选股", expanded=False):
+        new_code = st.text_input("股票代码（如 600519）", key="wl_code", placeholder="600519")
+        group_name = st.text_input("分组名（默认：自选）", key="wl_group", value="自选", placeholder="自选")
+        if st.button("添加", use_container_width=True, key="wl_add"):
+            code = new_code.strip()
+            if code.isdigit() and len(code) == 6:
+                group = group_name.strip() or "自选"
+                st.session_state.watchlist.setdefault(group, [])
+                if code not in st.session_state.watchlist[group]:
+                    st.session_state.watchlist[group].append(code)
+                    st.success(f"已添加 {code} 到「{group}」")
+                    st.rerun()
+                else:
+                    st.warning(f"{code} 已存在")
+            else:
+                st.error("请输入6位数字股票代码")
+
+    # 显示自选股分组
+    if st.session_state.watchlist:
+        for group, codes in list(st.session_state.watchlist.items()):
+            with st.expander(f"  {group}（{len(codes)}只）", expanded=False):
+                for code in codes:
+                    col_a, col_b = st.columns([3, 1])
+                    with col_a:
+                        st.code(code, language=None)
+                    with col_b:
+                        if st.button("✕", key=f"wl_del_{group}_{code}"):
+                            st.session_state.watchlist[group].remove(code)
+                            if not st.session_state.watchlist[group]:
+                                del st.session_state.watchlist[group]
+                            st.rerun()
+
+        # 一键分析按钮
+        total_stocks = sum(len(v) for v in st.session_state.watchlist.values())
+        if st.button(f"  分析全部自选股（{total_stocks}只）", type="primary", use_container_width=True, key="wl_analyze"):
+            st.session_state.trigger_analysis = True
+            st.rerun()
 
     st.markdown("---")
 
@@ -211,6 +258,41 @@ user_input = st.chat_input("请输入您的问题...", key="user_input")
 if "quick_msg" in st.session_state and st.session_state.quick_msg:
     user_input = st.session_state.quick_msg
     st.session_state.quick_msg = ""
+
+# 处理自选股分析
+if st.session_state.get("trigger_analysis"):
+    st.session_state.trigger_analysis = False
+    all_stocks = []
+    for codes in st.session_state.watchlist.values():
+        all_stocks.extend(codes)
+
+    if all_stocks:
+        with st.chat_message("user"):
+            st.markdown(f"  分析自选股（{len(all_stocks)}只）：{', '.join(all_stocks)}")
+        st.session_state.messages.append({
+            "role": "user",
+            "content": f"分析自选股：{', '.join(all_stocks)}",
+        })
+
+        with st.chat_message("assistant"):
+            with st.spinner(f"  正在分析 {len(all_stocks)} 只自选股（市值+估值+ESG）..."):
+                try:
+                    report = analyze_watchlist(all_stocks)
+                    st.markdown('<span class="agent-badge badge-analysis">  自选股报告</span>', unsafe_allow_html=True)
+                    st.markdown(report)
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": report,
+                        "agent": "analysis_agent",
+                    })
+                except Exception as e:
+                    error_msg = f"抱歉，分析出错：{str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": error_msg,
+                        "agent": "error",
+                    })
 
 if user_input:
     # 显示用户消息

@@ -21,7 +21,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
 
 from .config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
-from .mcp_tools import STOCK_TOOLS, ANALYSIS_TOOLS, ESG_TOOLS, TOOL_MAP
+from .mcp_tools import STOCK_TOOLS, ANALYSIS_TOOLS, ESG_TOOLS, TOOL_MAP, _call_mcp_tool_sync
 from .prompts import (
     SUPERVISOR_PROMPT,
     STOCK_AGENT_PROMPT,
@@ -264,6 +264,101 @@ def get_graph() -> StateGraph:
 
 
 # ---------- 对话接口 ----------
+
+def analyze_watchlist(stock_codes: List[str]) -> str:
+    """批量分析自选股，生成对比报告
+
+    对每只股票依次调用：市值、综合评估、ESG评级
+    然后由 LLM 汇总生成对比分析报告。
+
+    Args:
+        stock_codes: 股票代码列表
+
+    Returns:
+        格式化的分析报告字符串
+    """
+    import json
+
+    llm = _create_llm(temperature=0.3)
+
+    # 收集每只股票的数据
+    stock_data = {}
+    for code in stock_codes[:10]:  # 最多10只，避免超时
+        logger.info(f"正在分析自选股: {code}")
+        info = {"code": code, "name": code}
+
+        try:
+            mv = _call_mcp_tool_sync("stk_market_value", {"security_code": code})
+            mv_data = _safe_json(mv)
+            info["market"] = mv_data
+            info["name"] = mv_data.get("security_name", code)
+        except Exception:
+            info["market"] = {"error": "获取失败"}
+
+        try:
+            ev = _call_mcp_tool_sync("stk_eval", {"security_code": code})
+            info["eval"] = _safe_json(ev)
+        except Exception:
+            info["eval"] = {"error": "获取失败"}
+
+        try:
+            esg = _call_mcp_tool_sync("miotech_esg_rating", {"security_code": code})
+            info["esg"] = _safe_json(esg)
+        except Exception:
+            info["esg"] = {"error": "获取失败"}
+
+        stock_data[code] = info
+
+    # 构建 LLM 提示词
+    summary_lines = []
+    for code, info in stock_data.items():
+        mv = info.get("market", {})
+        ev = info.get("eval", {})
+        esg = info.get("esg", {})
+        summary_lines.append(
+            f"| {info['name']}({code}) "
+            f"| 收盘 {mv.get('close_price','?')} "
+            f"| 市值 {_fmt_cap(mv.get('total_market_cap','?'))} "
+            f"| ESG {esg.get('esg_rate','?')} "
+            f"| 评估: {str(ev)[:100]} |"
+        )
+
+    report_prompt = f"""你是一位资深投资分析师。以下是自选股数据：
+
+{chr(10).join(summary_lines)}
+
+请生成一份专业的自选股分析报告，包含：
+1. **概览** — 组合整体特征（行业分布、市值规模等）
+2. **估值对比** — 各股票估值水平横向对比
+3. **ESG 表现** — ESG评级对比
+4. **综合建议** — 基于以上数据给出投资建议（仅供参考，不构成投资意见）
+
+用 Markdown 格式输出，语言专业但不晦涩。"""
+
+    response = llm.invoke([SystemMessage(content=report_prompt)])
+    return response.content
+
+
+def _safe_json(data):
+    """安全解析 JSON"""
+    import json
+    if isinstance(data, dict):
+        return data
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        return {"text": str(data)[:500]}
+
+
+def _fmt_cap(value):
+    """格式化市值"""
+    if isinstance(value, (int, float)):
+        if value > 1e12:
+            return f"{value/1e12:.2f}万亿"
+        elif value > 1e8:
+            return f"{value/1e8:.2f}亿"
+    return str(value)
+
 
 def chat(message: str, thread_id: str = "default") -> Dict[str, Any]:
     """同步对话接口
