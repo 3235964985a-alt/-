@@ -304,8 +304,8 @@ def get_graph() -> StateGraph:
 def analyze_watchlist(stock_codes: List[str]) -> str:
     """批量分析自选股，生成对比报告（并行加速）
 
-    每只股票并行调用：市值、综合评估、ESG评级，
-    然后由 LLM 汇总生成对比分析报告。
+    每只股票并行调用：市值、综合评估、ESG评级；
+    同时获取市场舆情情绪评分，由 LLM 汇总生成含舆情分析的对比报告。
 
     Args:
         stock_codes: 股票代码列表
@@ -315,41 +315,52 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
     """
     import json
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from .news_mcp import get_news_sentiment
 
     llm = _create_llm(temperature=0.3)
 
-    # 并行收集每只股票的数据
-    def _fetch_one_stock(code):
-        """并行：同时取市值+评估+ESG"""
-        info = {"code": code, "name": code}
-        with ThreadPoolExecutor(max_workers=3) as inner:
-            f_mv = inner.submit(_call_mcp_tool_sync, "stk_market_value", {"security_code": code})
-            f_ev = inner.submit(_call_mcp_tool_sync, "stk_eval", {"security_code": code})
-            f_esg = inner.submit(_call_mcp_tool_sync, "miotech_esg_rating", {"security_code": code})
+    # 并行：数据获取 + 舆情获取
+    with ThreadPoolExecutor(max_workers=6) as outer:
+        f_sentiment = outer.submit(get_news_sentiment)
 
-            try:
-                info["market"] = _safe_json(f_mv.result(timeout=10))
-                info["name"] = info["market"].get("security_name", code)
-            except Exception:
-                info["market"] = {}
-            try:
-                info["eval"] = _safe_json(f_ev.result(timeout=10))
-            except Exception:
-                info["eval"] = {}
-            try:
-                info["esg"] = _safe_json(f_esg.result(timeout=10))
-            except Exception:
-                info["esg"] = {}
-        return code, info
+        def _fetch_one_stock(code):
+            """并行：同时取市值+评估+ESG"""
+            info = {"code": code, "name": code}
+            with ThreadPoolExecutor(max_workers=3) as inner:
+                f_mv = inner.submit(_call_mcp_tool_sync, "stk_market_value", {"security_code": code})
+                f_ev = inner.submit(_call_mcp_tool_sync, "stk_eval", {"security_code": code})
+                f_esg = inner.submit(_call_mcp_tool_sync, "miotech_esg_rating", {"security_code": code})
 
-    stock_data = {}
-    max_stocks = stock_codes[:10]
+                try:
+                    info["market"] = _safe_json(f_mv.result(timeout=10))
+                    info["name"] = info["market"].get("security_name", code)
+                except Exception:
+                    info["market"] = {}
+                try:
+                    info["eval"] = _safe_json(f_ev.result(timeout=10))
+                except Exception:
+                    info["eval"] = {}
+                try:
+                    info["esg"] = _safe_json(f_esg.result(timeout=10))
+                except Exception:
+                    info["esg"] = {}
+            return code, info
 
-    with ThreadPoolExecutor(max_workers=min(len(max_stocks), 5)) as pool:
-        futures = {pool.submit(_fetch_one_stock, c): c for c in max_stocks}
-        for f in as_completed(futures):
-            code, info = f.result()
-            stock_data[code] = info
+        stock_data = {}
+        max_stocks = stock_codes[:10]
+
+        with ThreadPoolExecutor(max_workers=min(len(max_stocks), 5)) as pool:
+            futures = {pool.submit(_fetch_one_stock, c): c for c in max_stocks}
+            for f in as_completed(futures):
+                code, info = f.result()
+                stock_data[code] = info
+
+        # 获取舆情
+        try:
+            sentiment_raw = f_sentiment.result(timeout=15)
+            sentiment = json.loads(sentiment_raw) if isinstance(sentiment_raw, str) else sentiment_raw
+        except Exception:
+            sentiment = {"error": "舆情获取失败"}
 
     # 构建 LLM 提示词
     summary_lines = []
@@ -365,15 +376,21 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
             f"| 评估: {str(ev)[:100]} |"
         )
 
-    report_prompt = f"""你是一位资深投资分析师。以下是自选股数据：
+    report_prompt = f"""你是一位资深投资分析师。以下是自选股数据和市场舆情：
 
+【股票数据】
 {chr(10).join(summary_lines)}
 
-请生成一份专业的自选股分析报告，包含：
+【市场舆情情绪】（来源：财联社/华尔街见闻/雪球，LLM评分 -100~100）
+{json.dumps(sentiment, ensure_ascii=False, indent=2)[:2000]}
+
+请生成一份专业的自选股分析报告，**必须包含以下所有板块**：
+
 1. **概览** — 组合整体特征（行业分布、市值规模等）
 2. **估值对比** — 各股票估值水平横向对比
 3. **ESG 表现** — ESG评级对比
-4. **综合建议** — 基于以上数据给出投资建议（仅供参考，不构成投资意见）
+4. **舆情分析** — **必须逐只股票打分**（-100~100），结合市场整体情绪和个股关联新闻，分析舆情风险与机会
+5. **综合建议** — 基于以上全部数据给出投资建议（仅供参考，不构成投资意见）
 
 用 Markdown 格式输出，语言专业但不晦涩。
 
