@@ -85,6 +85,53 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ---------- 系统说明弹窗 ----------
+@st.dialog("  系统说明 — 金融智能助手", width="large")
+def show_system_dialog():
+    cols = st.columns(3)
+    cols[0].metric("  智能体", "5")
+    cols[1].metric("  MCP工具", "23")
+    cols[2].metric("  数据源", "4")
+
+    st.divider()
+    st.subheader("  多智能体架构")
+    st.markdown("""
+    | Agent | 职能 | 工具 |
+    |---|---|---|
+    | 股票数据 | 个股市值、收盘价、调研 | 4 |
+    | 财务分析 | DCF估值、ROE/ROIC等10项筛选 | 10 |
+    | ESG评级 | 妙盈/华证/商道融绿三机构评级 | 3 |
+    | 财经新闻 | 14+新闻源 + LLM情绪评分 | 5 |
+    | 通用助手 | 金融知识问答 + RAG | 1 |
+    """)
+
+    st.subheader("  数据源")
+    st.markdown("""
+    | 来源 | 协议 | 内容 |
+    |---|---|---|
+    | 证券之星 | MCP (SSE) | 市值、DCF估值、ESG评级、筛选指标 |
+    | 东方财富 | AKShare | 概念板块(494) + 行业板块(496) 实时行情 |
+    | NewsNow | HTTP | 14+新闻源实时热点 + LLM情绪评分 |
+    | ChromaDB | 本地 | RAG金融知识库 |
+    """)
+
+    st.subheader("✨ 技术栈")
+    st.markdown("""
+    - **LLM**: GPT-4o · **框架**: LangChain + LangGraph
+    - **协议**: MCP · **架构**: Supervisor-Worker
+    - **知识库**: RAG + ChromaDB · **截图识别**: EasyOCR
+    """)
+
+    st.subheader("  特色功能")
+    st.markdown("""
+    - 大盘综合报告（龙头股 + 板块 + 新闻三路聚合）
+    - 板块轮动分析（概念/行业涨跌TOP5）
+    - 新闻情绪评分（三源LLM打分，-100~100）
+    - 持仓截图OCR识别（EasyOCR + LLM解析）
+    - 自选股多Agent协作分析 · 流式逐字输出
+    """)
+
+
 # ---------- 侧边栏 ----------
 with st.sidebar:
     st.markdown("##  金融智能助手")
@@ -188,54 +235,6 @@ with st.sidebar:
 
     st.markdown("---")
     st.caption("© 2025 课程设计项目 | 金融智能对话系统")
-
-
-
-# ---------- 系统说明弹窗 ----------
-@st.dialog("  系统说明 — 金融智能助手", width="large")
-def show_system_dialog():
-    cols = st.columns(3)
-    cols[0].metric("  智能体", "5")
-    cols[1].metric("  MCP工具", "23")
-    cols[2].metric("  数据源", "4")
-
-    st.divider()
-    st.subheader("  多智能体架构")
-    st.markdown("""
-    | Agent | 职能 | 工具 |
-    |---|---|---|
-    | 股票数据 | 个股市值、收盘价、调研 | 4 |
-    | 财务分析 | DCF估值、ROE/ROIC等10项筛选 | 10 |
-    | ESG评级 | 妙盈/华证/商道融绿三机构评级 | 3 |
-    | 财经新闻 | 14+新闻源 + LLM情绪评分 | 5 |
-    | 通用助手 | 金融知识问答 + RAG | 1 |
-    """)
-
-    st.subheader("  数据源")
-    st.markdown("""
-    | 来源 | 协议 | 内容 |
-    |---|---|---|
-    | 证券之星 | MCP (SSE) | 市值、DCF估值、ESG评级、筛选指标 |
-    | 东方财富 | AKShare | 概念板块(494) + 行业板块(496) 实时行情 |
-    | NewsNow | HTTP | 14+新闻源实时热点 + LLM情绪评分 |
-    | ChromaDB | 本地 | RAG金融知识库 |
-    """)
-
-    st.subheader("✨ 技术栈")
-    st.markdown("""
-    - **LLM**: GPT-4o · **框架**: LangChain + LangGraph
-    - **协议**: MCP · **架构**: Supervisor-Worker
-    - **知识库**: RAG + ChromaDB · **截图识别**: EasyOCR
-    """)
-
-    st.subheader("  特色功能")
-    st.markdown("""
-    - 大盘综合报告（龙头股 + 板块 + 新闻三路聚合）
-    - 板块轮动分析（概念/行业涨跌TOP5）
-    - 新闻情绪评分（三源LLM打分，-100~100）
-    - 持仓截图OCR识别（EasyOCR + LLM解析）
-    - 自选股多Agent协作分析 · 流式逐字输出
-    """)
 
 
 # ---------- 主体 ----------
