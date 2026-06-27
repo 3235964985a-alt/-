@@ -16,6 +16,8 @@ import operator
 from typing import Annotated, Any, Dict, List, Literal, Optional, Sequence, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
@@ -222,7 +224,7 @@ def build_graph() -> StateGraph:
     workflow.add_node(AGENT_NODES["supervisor"], create_supervisor_node())
     workflow.add_node(
         AGENT_NODES["stock_agent"],
-        _create_worker_node("stock_agent", STOCK_AGENT_PROMPT, STOCK_TOOLS, use_rag=False),
+        _create_worker_node("stock_agent", STOCK_AGENT_PROMPT, STOCK_TOOLS + [market_overview_tool], use_rag=False),
     )
     workflow.add_node(
         AGENT_NODES["analysis_agent"],
@@ -392,6 +394,75 @@ def _fmt_cap(value):
         elif value > 1e8:
             return f"{value/1e8:.2f}亿"
     return str(value)
+
+
+def get_market_overview() -> str:
+    """获取每日大盘概览
+
+    采集核心龙头股市值+价格数据，由 LLM 汇总生成当日盘面快照。
+    可在对话中问'今天大盘怎么样'触发，也可从侧边栏一键调用。
+
+    Returns:
+        格式化的市场概览字符串
+    """
+    import json
+
+    llm = _create_llm(temperature=0.2)
+
+    # 核心标的：覆盖消费/新能源/金融/科技
+    BENCHMARK_STOCKS = {
+        "600519": "消费·茅台",
+        "300750": "新能源·宁德时代",
+        "600036": "金融·招商银行",
+        "601318": "金融·中国平安",
+        "000858": "消费·五粮液",
+        "002415": "科技·海康威视",
+        "601012": "新能源·隆基绿能",
+    }
+
+    stock_data = []
+    for code, label in BENCHMARK_STOCKS.items():
+        try:
+            raw = _call_mcp_tool_sync("stk_market_value", {"security_code": code})
+            d = _safe_json(raw)
+            if d.get("security_name"):
+                cap = d.get("total_market_cap", 0)
+                change_pct = d.get("change_pct", d.get("chg_pct", None))  # 涨跌幅
+                stock_data.append({
+                    "code": code,
+                    "name": d.get("security_name", code),
+                    "label": label,
+                    "price": d.get("close_price", "--"),
+                    "cap": _fmt_cap(cap),
+                    "change": f"{change_pct:+.2f}%" if isinstance(change_pct, (int, float)) else "--",
+                })
+        except Exception as e:
+            logger.warning(f"获取 {code} 数据失败: {e}")
+
+    if not stock_data:
+        return "暂无市场数据"
+
+    # LLM 汇总
+    data_text = json.dumps(stock_data, ensure_ascii=False, indent=2)
+    prompt = f"""你是一个专业的大盘分析师。以下是今日核心龙头股数据（基于MCP实时行情）：
+
+{data_text}
+
+请生成一份精炼的「今日大盘概览」，包含：
+1. 核心指数风向（根据权重股表现推断大盘情绪：偏暖/偏冷/震荡）
+2. 分行业简评（消费/金融/新能源/科技各一句话）
+3. 一句话市场总结
+
+输出风格：简洁、有数据支撑，3-5句话即可。"""
+
+    response = llm.invoke(prompt)
+    return response.content or "无法生成大盘概览"
+
+
+@tool
+def market_overview_tool(dummy: str = "") -> str:
+    """获取当日A股大盘概览（核心龙头股市值+行情）。无参数，直接调用。"""
+    return get_market_overview()
 
 
 def chat(message: str, thread_id: str = "default") -> Dict[str, Any]:

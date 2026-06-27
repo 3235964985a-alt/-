@@ -14,7 +14,7 @@ from datetime import datetime
 # 添加src到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.agent import chat, chat_stream, analyze_watchlist
+from src.agent import chat, chat_stream, analyze_watchlist, get_market_overview
 
 
 # ---------- 页面配置 ----------
@@ -96,7 +96,7 @@ with st.sidebar:
     with col1:
         st.metric("  Agent", "5")
     with col2:
-        st.metric("  Tools", "20")
+        st.metric("  Tools", "21")
 
     st.markdown("---")
 
@@ -175,6 +175,13 @@ with st.sidebar:
         st.session_state.thread_id = str(uuid.uuid4())
         st.rerun()
 
+    # 大盘概览快捷按钮
+    st.markdown("---")
+    if st.button("  大盘概览", type="primary", use_container_width=True, key="market_overview_btn",
+                 help="一键获取今日A股核心龙头行情概览"):
+        st.session_state.trigger_market_overview = True
+        st.rerun()
+
     st.markdown("---")
     st.caption("© 2025 课程设计项目 | 金融智能对话系统")
 
@@ -199,6 +206,7 @@ if not st.session_state.messages:
     <div class="info-box">
         <strong> 欢迎使用金融智能助手！</strong><br>
         我可以帮你：<br>
+        • 查询龙头行情大盘概览<br>
         • 查询股票市值和机构调研信息<br>
         • 进行DCF估值诊断和综合评估<br>
         • 查询ESG评级（妙盈科技/华证指数/商道融绿）<br>
@@ -297,6 +305,33 @@ if st.session_state.get("trigger_analysis"):
                         "content": error_msg,
                         "agent": "error",
                     })
+
+# 处理大盘概览
+if st.session_state.get("trigger_market_overview"):
+    st.session_state.trigger_market_overview = False
+    with st.chat_message("user"):
+        st.markdown("  今日大盘概览")
+    st.session_state.messages.append({"role": "user", "content": "大盘概览"})
+
+    with st.chat_message("assistant"):
+        with st.spinner("  查询核心龙头行情..."):
+            try:
+                overview = get_market_overview()
+                st.markdown('<span class="agent-badge badge-stock">  大盘概览</span>', unsafe_allow_html=True)
+                st.markdown(overview)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": overview,
+                    "agent": "stock_agent",
+                })
+            except Exception as e:
+                error_msg = f"抱歉，获取大盘数据失败：{str(e)}"
+                st.error(error_msg)
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": error_msg,
+                    "agent": "error",
+                })
 
 if user_input:
     # 显示用户消息
