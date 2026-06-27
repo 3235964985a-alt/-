@@ -433,29 +433,23 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
 
 
 def _sanitize_hallucination(text: str) -> str:
-    """后置防幻觉清理——检测并警告 LLM 编造的历史数据
+    """后置防幻觉清理——检测 LLM 编造的历史数据（不误伤 MCP 真实数据）
 
-    当 MCP/AKShare 数据获取失败时，LLM 可能用训练数据填充。
-    此函数检测常见编造模式并追加警告标记。
+    仅当检测到明确的训练数据特征时才追加警告。
     """
     import re
 
     warnings = []
-    # 检测"2024年"相关编造
-    if re.search(r'2024\s*年(前三季度|年报|中报|财报|一季度|半年报)', text):
-        warnings.append(" 检测到可能使用训练数据（2024年财务数字），疑似编造，请谨慎参考。")
+    # 只检测最明显的编造：精确的2024年年份 + 季度财报组合
+    if re.search(r'2024\s*年(前三季度|三季度单季)', text):
+        warnings.append(" 检测到'2024年前三季度'数据，此数据来自训练记忆非实时 MCP，请忽略。")
 
-    # 检测精确到两位小数的营收/利润数字（典型的训练数据特征）
-    fake_patterns = re.findall(r'(营业收入|归母净利润|扣非净利润|营收)[：:][\s]*([\d.]+)\s*(亿元|万元|亿)', text)
-    if len(fake_patterns) >= 3:
-        warnings.append(" 检测到多个精确财务数字，可能非实时 MCP 数据，请核对数据源。")
-
-    # 检测"机构调研""目标均价"等编造
-    if re.search(r'目标均价.*元|过去\d+天内.*机构|机构调研信息|海通证券.*淡水泉', text):
-        warnings.append(" 检测到机构调研/目标价等数据，可能来自训练知识，请以 MCP 实时数据为准。")
+    # 机构名称 + 目标均价 组合（明确的编造特征）
+    if re.search(r'(海通证券|景顺长城|淡水泉).*目标均价|目标均价.*(海通证券|景顺长城|淡水泉)', text):
+        warnings.append(" 检测到编造的机构调研/目标价数据，非 MCP 实时返回。")
 
     if warnings:
-        warning_block = "\n\n>   **数据真实性警告**\n" + "\n".join(f"> {w}" for w in warnings)
+        warning_block = "\n\n>   **发现编造数据**\n" + "\n".join(f"> {w}" for w in warnings)
         text = warning_block + "\n\n" + text
 
     return text
