@@ -45,6 +45,7 @@ AGENT_NODES = {
     "analysis_agent": "analysis_agent",
     "esg_agent": "esg_agent",
     "news_agent": "news_agent",
+    "finish_agent": "finish_agent",
     "general_agent": "general_agent",
 }
 
@@ -90,6 +91,17 @@ def create_supervisor_node():
 
         response = llm.invoke(decision_msgs)
         decision = (response.content or "").strip().lower()
+
+        # 防死循环：最多3轮
+        if round_count >= 3:
+            logger.info(f"Supervisor 达到最大轮次 → finish_agent")
+            return {"next_agent": "finish_agent", "round_count": round_count + 1}
+
+        # 第1轮之后，Supervisor 可以决定 FINISH
+        if round_count >= 1:
+            if "finish" in decision or "summary" in decision or "总结" in decision:
+                logger.info(f"Supervisor 决定汇总 → finish_agent")
+                return {"next_agent": "finish_agent", "round_count": round_count + 1}
 
         # 解析并规范化决策
         for agent_name in ["stock_agent", "analysis_agent", "esg_agent", "news_agent", "general_agent"]:
@@ -229,11 +241,17 @@ def build_graph() -> StateGraph:
         _create_worker_node("news_agent", NEWS_AGENT_PROMPT, NEWS_TOOLS, use_rag=False),
     )
 
+    # finish_agent：汇总各 Agent 输出，生成综合报告
+    workflow.add_node(
+        AGENT_NODES["finish_agent"],
+        _create_worker_node("finish_agent", GENERAL_AGENT_PROMPT, [], use_rag=False),
+    )
+
     # 设置入口
     workflow.set_entry_point(AGENT_NODES["supervisor"])
 
     # Supervisor → 各Worker的条件路由
-    def route_to_worker(state: AgentState) -> Literal["stock_agent", "analysis_agent", "esg_agent", "news_agent", "general_agent"]:
+    def route_to_worker(state: AgentState) -> Literal["stock_agent", "analysis_agent", "esg_agent", "news_agent", "finish_agent", "general_agent"]:
         return state["next_agent"]
 
     workflow.add_conditional_edges(
@@ -244,16 +262,20 @@ def build_graph() -> StateGraph:
             "analysis_agent": AGENT_NODES["analysis_agent"],
             "esg_agent": AGENT_NODES["esg_agent"],
             "news_agent": AGENT_NODES["news_agent"],
+            "finish_agent": AGENT_NODES["finish_agent"],
             "general_agent": AGENT_NODES["general_agent"],
         },
     )
 
-    # 各Worker → END
-    workflow.add_edge(AGENT_NODES["stock_agent"], END)
-    workflow.add_edge(AGENT_NODES["analysis_agent"], END)
-    workflow.add_edge(AGENT_NODES["esg_agent"], END)
-    workflow.add_edge(AGENT_NODES["general_agent"], END)
-    workflow.add_edge(AGENT_NODES["news_agent"], END)
+    # 各Worker → Supervisor（多轮协作：干完活回来，让 Supervisor 判断是否继续）
+    workflow.add_edge(AGENT_NODES["stock_agent"], AGENT_NODES["supervisor"])
+    workflow.add_edge(AGENT_NODES["analysis_agent"], AGENT_NODES["supervisor"])
+    workflow.add_edge(AGENT_NODES["esg_agent"], AGENT_NODES["supervisor"])
+    workflow.add_edge(AGENT_NODES["general_agent"], AGENT_NODES["supervisor"])
+    workflow.add_edge(AGENT_NODES["news_agent"], AGENT_NODES["supervisor"])
+
+    # finish_agent 直接结束
+    workflow.add_edge(AGENT_NODES["finish_agent"], END)
 
     # 编译图（带内存检查点）
     memory = MemorySaver()
