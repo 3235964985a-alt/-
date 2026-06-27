@@ -24,6 +24,17 @@ NEWS_SOURCES = {
     "linux热榜": "linuxdo-hot",
 }
 
+_FINANCE_SOURCES = {"cls-hot", "xueqiu", "wallstreetcn"}  # 核心财经源，全量获取
+
+# 仅返回有实际新闻内容的源，过滤名字列表型源
+_SKIP_SOURCES = {
+    "bilibili-hot-search", "coolapk", "douyin", "kuaishou",  # 非财经内容
+    "github-trending-today", "linuxdo-hot",  # 非中文/非财经
+}
+
+# 雪球只返回股票代码名，取更多条才有内容
+_XUEQIU_LIMIT = 15
+
 
 def _fetch_source(source_id: str) -> Optional[Dict]:
     """从 NewsNow API 获取单个源的热点"""
@@ -69,10 +80,20 @@ def _call_newsnow(tool_name: str, arguments: dict) -> str:
 
     if tool_name == "get_all_news":
         results = {}
-        for name, src_id in list(NEWS_SOURCES.items())[:10]:  # 限10个避免超时
+        for name, src_id in NEWS_SOURCES.items():
+            if src_id in _SKIP_SOURCES:
+                continue
             data = _fetch_source(src_id)
             if data:
-                results[name] = _parse_items(data)[:5]
+                items = _parse_items(data)
+                if src_id == "xueqiu":
+                    items = items[:_XUEQIU_LIMIT]
+                elif src_id in _FINANCE_SOURCES:
+                    pass  # 全取
+                else:
+                    items = items[:5]
+                if items:
+                    results[name] = items
         return _format_multi(results)
 
     return json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False)
