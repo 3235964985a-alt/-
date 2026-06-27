@@ -173,6 +173,53 @@ with st.sidebar:
             st.session_state.trigger_analysis = True
             st.rerun()
 
+    # 持仓截图上传
+    st.markdown("---")
+    st.markdown("###  持仓截图识别")
+    with st.expander("  上传持仓截图，自动识别并分析", expanded=False):
+        uploaded_file = st.file_uploader("上传同花顺/东方财富持仓截图", type=["png", "jpg", "jpeg"], key="portfolio_upload")
+        if uploaded_file and st.button("  识别并分析持仓", type="primary", use_container_width=True, key="btn_ocr"):
+            with st.spinner("  OCR 识别中..."):
+                try:
+                    from src.ocr_parser import parse_portfolio_from_image
+                    import tempfile, os
+
+                    # 保存上传文件到临时目录
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                        tmp.write(uploaded_file.read())
+                        tmp_path = tmp.name
+
+                    holdings = parse_portfolio_from_image(tmp_path)
+                    os.unlink(tmp_path)
+
+                    if holdings:
+                        st.success(f"识别到 {len(holdings)} 只持仓股")
+                        # 显示识别结果
+                        for h in holdings:
+                            code = h.get("code", "")
+                            name = h.get("name", "")
+                            shares = h.get("shares", "")
+                            profit = h.get("profit", "")
+                            info_parts = [name, f"`{code}`"]
+                            if shares:
+                                info_parts.append(f"{shares}股")
+                            if profit:
+                                info_parts.append(f"盈亏{profit}")
+                            st.write(f"• {' · '.join(info_parts)}")
+
+                        # 存入 trigger_ocr_analysis 等待用户确认
+                        codes = [h["code"] for h in holdings if h.get("code")]
+                        if codes:
+                            st.session_state.ocr_codes = codes
+                            st.session_state.trigger_ocr_analysis = True
+                            st.rerun()
+                    else:
+                        st.warning("未识别到股票代码，请确认截图中包含6位数字代码")
+                except Exception as e:
+                    st.error(f"识别失败：{e}")
+        if "ocr_codes" in st.session_state and st.session_state.ocr_codes:
+            st.info(f"已识别 {len(st.session_state.ocr_codes)} 只持仓：{', '.join(st.session_state.ocr_codes)}")
+
     st.markdown("---")
 
     st.markdown("### ✨ 技术栈")
@@ -181,6 +228,7 @@ with st.sidebar:
     - **框架**: LangChain + LangGraph
     - **协议**: MCP (Model Context Protocol)
     - **知识库**: RAG + ChromaDB
+    - **识别**: EasyOCR 持股截图解析
     - **架构**: Supervisor-Worker 多智能体
     """)
 
@@ -317,6 +365,39 @@ if st.session_state.get("trigger_analysis"):
                     })
                 except Exception as e:
                     error_msg = f"抱歉，分析出错：{str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": error_msg,
+                        "agent": "error",
+                    })
+
+# 处理 OCR 持仓分析
+if st.session_state.get("trigger_ocr_analysis"):
+    st.session_state.trigger_ocr_analysis = False
+    codes = st.session_state.get("ocr_codes", [])
+    if codes:
+        code_list = ", ".join(codes)
+        with st.chat_message("user"):
+            st.markdown(f"  持仓截图识别（{len(codes)}只）：{code_list}")
+        st.session_state.messages.append({
+            "role": "user",
+            "content": f"分析持仓：{code_list}",
+        })
+
+        with st.chat_message("assistant"):
+            with st.spinner(f"  正在分析 {len(codes)} 只持仓股（市值+估值+ESG）..."):
+                try:
+                    report = analyze_watchlist(codes)
+                    st.markdown('<span class="agent-badge badge-analysis">  持仓分析报告</span>', unsafe_allow_html=True)
+                    st.markdown(report)
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": report,
+                        "agent": "analysis_agent",
+                    })
+                except Exception as e:
+                    error_msg = f"抱歉，持仓分析出错：{str(e)}"
                     st.error(error_msg)
                     st.session_state.messages.append({
                         "role": "assistant",
