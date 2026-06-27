@@ -14,7 +14,7 @@ from datetime import datetime
 # 添加src到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.agent import chat, analyze_watchlist
+from src.agent import chat, chat_stream, analyze_watchlist
 
 
 # ---------- 页面配置 ----------
@@ -304,44 +304,80 @@ if user_input:
         st.markdown(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # 调用后端Agent
+    # 调用后端Agent（流式）
     with st.chat_message("assistant"):
         with st.spinner("  思考中..."):
             try:
-                result = chat(user_input, thread_id=st.session_state.thread_id)
-                response_text = result.get("response", "抱歉，无法处理您的请求。")
-                agent = result.get("agent", "general_agent")
+                # 流式输出
+                response_placeholder = st.empty()
+                current_agent = "general_agent"
+                streamed_text = ""
 
-                # Agent标签
-                badge_class = {
-                    "supervisor": "badge-supervisor",
-                    "stock_agent": "badge-stock",
-                    "analysis_agent": "badge-analysis",
-                    "esg_agent": "badge-esg",
-                    "news_agent": "badge-news",
-                    "general_agent": "badge-general",
-                }.get(agent, "badge-general")
+                for chunk in chat_stream(user_input, thread_id=st.session_state.thread_id):
+                    if chunk["type"] == "agent":
+                        current_agent = chunk["name"]
 
-                agent_label = {
-                    "supervisor": "主管",
-                    "stock_agent": "股票数据",
-                    "analysis_agent": "财务分析",
-                    "esg_agent": "ESG评级",
-                    "news_agent": "财经新闻",
-                    "general_agent": "通用助手",
-                }.get(agent, agent)
+                    elif chunk["type"] == "content":
+                        streamed_text += chunk["text"]
+                        badge_class = {
+                            "supervisor": "badge-supervisor",
+                            "stock_agent": "badge-stock",
+                            "analysis_agent": "badge-analysis",
+                            "esg_agent": "badge-esg",
+                            "news_agent": "badge-news",
+                            "finish_agent": "badge-general",
+                            "general_agent": "badge-general",
+                        }.get(current_agent, "badge-general")
 
-                st.markdown(
-                    f'<span class="agent-badge {badge_class}">  {agent_label}</span>',
-                    unsafe_allow_html=True,
-                )
-                st.markdown(response_text)
+                        agent_label = {
+                            "supervisor": "主管",
+                            "stock_agent": "股票数据",
+                            "analysis_agent": "财务分析",
+                            "esg_agent": "ESG评级",
+                            "finish_agent": "综合报告",
+                            "news_agent": "财经新闻",
+                            "general_agent": "通用助手",
+                        }.get(current_agent, current_agent)
 
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": response_text,
-                    "agent": agent,
-                })
+                        response_placeholder.markdown(
+                            f'<span class="agent-badge {badge_class}">  {agent_label}</span>\n\n{streamed_text}',
+                            unsafe_allow_html=True,
+                        )
+
+                    elif chunk["type"] == "done":
+                        response_text = chunk.get("response", streamed_text)
+                        final_agent = chunk.get("agent", current_agent)
+
+                        badge_class = {
+                            "supervisor": "badge-supervisor",
+                            "stock_agent": "badge-stock",
+                            "analysis_agent": "badge-analysis",
+                            "esg_agent": "badge-esg",
+                            "news_agent": "badge-news",
+                            "finish_agent": "badge-general",
+                            "general_agent": "badge-general",
+                        }.get(final_agent, "badge-general")
+
+                        agent_label = {
+                            "supervisor": "主管",
+                            "stock_agent": "股票数据",
+                            "analysis_agent": "财务分析",
+                            "esg_agent": "ESG评级",
+                            "finish_agent": "综合报告",
+                            "news_agent": "财经新闻",
+                            "general_agent": "通用助手",
+                        }.get(final_agent, final_agent)
+
+                        response_placeholder.markdown(
+                            f'<span class="agent-badge {badge_class}">  {agent_label}</span>\n\n{response_text}',
+                            unsafe_allow_html=True,
+                        )
+
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": response_text,
+                            "agent": final_agent,
+                        })
 
             except Exception as e:
                 error_msg = f" 抱歉，系统出错了：{str(e)}"

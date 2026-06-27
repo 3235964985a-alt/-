@@ -435,8 +435,13 @@ async def chat_async(message: str, thread_id: str = "default") -> Dict[str, Any]
 def chat_stream(message: str, thread_id: str = "default"):
     """流式对话接口
 
+    使用 LangGraph stream 模式，每个节点完成后产出增量状态，
+    最终 Agent 的输出会逐段流式返回。
+
     Yields:
-        状态更新dict，包含当前输出
+        {"type": "agent", "name": str}  — Agent 切换
+        {"type": "content", "text": str} — 最终回复内容（逐字模拟流式）
+        {"type": "done", "agent": str, "response": str} — 完成信号
     """
     graph = get_graph()
 
@@ -447,5 +452,35 @@ def chat_stream(message: str, thread_id: str = "default"):
         "round_count": 0,
     }
 
-    for event in graph.stream(state, config):
-        yield event
+    last_agent = "supervisor"
+    last_event = None
+
+    for event in graph.stream(state, config, stream_mode="values"):
+        last_event = event
+        agent_name = event.get("next_agent", "")
+
+        if agent_name and agent_name != last_agent:
+            yield {"type": "agent", "name": agent_name}
+            last_agent = agent_name
+
+    # 拿到最终回复
+    final_text = ""
+    if last_event:
+        all_messages = last_event.get("messages", [])
+        for m in reversed(all_messages):
+            if isinstance(m, AIMessage):
+                final_text = m.content
+                break
+
+    if not final_text:
+        final_text = "抱歉，无法处理您的请求。"
+
+    # 模拟流式逐字输出（实际生产中可用 LLM stream 替换）
+    import time
+    chunk_size = 15
+    for i in range(0, len(final_text), chunk_size):
+        chunk = final_text[i:i+chunk_size]
+        yield {"type": "content", "text": chunk}
+        time.sleep(0.02)
+
+    yield {"type": "done", "agent": last_agent, "response": final_text}
