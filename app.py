@@ -115,7 +115,9 @@ with st.sidebar:
 
     # 初始化自选股状态
     if "watchlist" not in st.session_state:
-        st.session_state.watchlist = {}  # {组名: [股票代码列表]}
+        st.session_state.watchlist = {}  # {组名: [[code, name], ...]}
+    if "watchlist_names" not in st.session_state:
+        st.session_state.watchlist_names = {}  # {code: name} 缓存
 
     # 添加自选股
     with st.expander("➕ 添加自选股", expanded=False):
@@ -126,26 +128,41 @@ with st.sidebar:
             if code.isdigit() and len(code) == 6:
                 group = group_name.strip() or "自选"
                 st.session_state.watchlist.setdefault(group, [])
-                if code not in st.session_state.watchlist[group]:
-                    st.session_state.watchlist[group].append(code)
-                    st.success(f"已添加 {code} 到「{group}」")
+                # 通过 MCP 查询股票名称
+                if code not in st.session_state.watchlist_names:
+                    try:
+                        from src.mcp_tools import _call_mcp_tool_sync
+                        import json
+                        raw = _call_mcp_tool_sync("stk_market_value", {"security_code": code})
+                        data = json.loads(raw)
+                        name = data.get("security_name", code)
+                    except Exception:
+                        name = code
+                    st.session_state.watchlist_names[code] = name
+                # 检查是否已存在
+                existing_codes = [c for c, _ in st.session_state.watchlist[group]]
+                if code not in existing_codes:
+                    st.session_state.watchlist[group].append([code, st.session_state.watchlist_names[code]])
+                    st.success(f"已添加 {st.session_state.watchlist_names[code]}（{code}）到「{group}」")
                     st.rerun()
                 else:
-                    st.warning(f"{code} 已存在")
+                    st.warning(f"{st.session_state.watchlist_names.get(code, code)} 已存在")
             else:
                 st.error("请输入6位数字股票代码")
 
     # 显示自选股分组
     if st.session_state.watchlist:
-        for group, codes in list(st.session_state.watchlist.items()):
-            with st.expander(f"  {group}（{len(codes)}只）", expanded=False):
-                for code in codes:
+        for group, entries in list(st.session_state.watchlist.items()):
+            with st.expander(f"  {group}（{len(entries)}只）", expanded=False):
+                for entry in entries:
+                    code = entry[0] if isinstance(entry, list) else entry
+                    name = entry[1] if isinstance(entry, list) and len(entry) > 1 else st.session_state.watchlist_names.get(code, code)
                     col_a, col_b = st.columns([3, 1])
                     with col_a:
-                        st.code(code, language=None)
+                        st.write(f"**{name}** `{code}`")
                     with col_b:
                         if st.button("✕", key=f"wl_del_{group}_{code}"):
-                            st.session_state.watchlist[group].remove(code)
+                            st.session_state.watchlist[group] = [e for e in entries if (e[0] if isinstance(e, list) else e) != code]
                             if not st.session_state.watchlist[group]:
                                 del st.session_state.watchlist[group]
                             st.rerun()
@@ -275,8 +292,9 @@ if "quick_msg" in st.session_state and st.session_state.quick_msg:
 if st.session_state.get("trigger_analysis"):
     st.session_state.trigger_analysis = False
     all_stocks = []
-    for codes in st.session_state.watchlist.values():
-        all_stocks.extend(codes)
+    for entries in st.session_state.watchlist.values():
+        for e in entries:
+            all_stocks.append(e[0] if isinstance(e, list) else e)
 
     if all_stocks:
         with st.chat_message("user"):
