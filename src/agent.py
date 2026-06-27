@@ -485,7 +485,7 @@ def _sanitize_hallucination(text: str) -> str:
 
 
 def debate_watchlist(stock_codes: List[str]) -> str:
-    """8-Agent 囚徒困境辩论投票，生成买卖建议报告
+    """5-Agent 辩论投票，生成买卖建议报告
 
     仅在用户明确要求买卖建议时调用。
 
@@ -513,12 +513,11 @@ def debate_watchlist(stock_codes: List[str]) -> str:
         type_label = {"growth": "成长型", "value": "价值型", "balanced": "平衡型"}.get(d.get("stock_type", "balanced"), "平衡型")
 
         weight_col = []
-        for agent_name, r2 in d["round2"].items():
-            c_flag = "  合作" if r2["cooperate"] else "  坚持"
+        for agent_name, v in d["agent_votes"].items():
             wb = d.get("weight_breakdown", {}).get(agent_name, {})
             fw = wb.get("final_weight", 1.0)
             weight_col.append(
-                f"| {agent_name} | {c_flag} | {r2['vote']} | {r2['score']} | ×{fw:.1f} | {r2['reason']} |"
+                f"| {agent_name} | {v['vote']} | {v['score']} | ×{fw:.1f} | {v['reason']} |"
             )
 
         debate_block = f"""### {name}（{code}） {signal}
@@ -529,13 +528,13 @@ def debate_watchlist(stock_codes: List[str]) -> str:
 {d.get('bull_bear_debate', '')[:500]}
 
 【投票明细】
-| 分析师 | 立场 | 投票 | 评分 | 权重 | 理由 |
-|---|---|---|---|---|---|
+| 分析师 | 投票 | 评分 | 权重 | 理由 |
+|---|---|---|---|---|
 {chr(10).join(weight_col)}
 
 """
 
-        single_report_prompt = f"""你是一位资深分析师。以下是 8 位分析师对 {name}({code}) 的辩论投票结果：
+        single_report_prompt = f"""你是一位资深分析师。以下是 5 位分析师对 {name}({code}) 的辩论投票结果：
 
 {debate_block}
 
@@ -557,7 +556,7 @@ def debate_watchlist(stock_codes: List[str]) -> str:
     if buy_signals:
         buy_list = ", ".join(f"**{d['stock_name']}**（{d['stock_code']}）" for d in buy_signals)
         final_report = (
-            f">   买入提醒：以下股票获 8 Agent 辩论多数 buy 票：{buy_list}\n"
+            f">   买入提醒：以下股票获 5 Agent 辩论多数 buy 票：{buy_list}\n"
             f"> 以上仅供参考，不构成投资建议。\n\n---\n\n{final_report}"
         )
 

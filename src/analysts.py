@@ -1,13 +1,14 @@
 """
-8-Agent 辩论投票系统 —— 囚徒困境博弈 + Bull/Bear 对抗辩论
+5-Agent 辩论投票系统 —— Bull/Bear 对抗辩论 + 独立打分
 
-使用统一的 data_layer 获取 MCP 数据，不再自行拼接 MCP 调用。
+使用统一的 data_layer 获取 MCP 数据。
 
 架构:
-  Round 0: Bull vs Bear 两轮对抗辩论
-  Round 1: 8 Agent 并行独立打分（含辩论结论输入）
-  Round 2: 公布所有人打分 → 囚徒困境博弈（合作 vs 背叛）
-  最终裁决: 合作者 1.5x 权重 + 动态角色权重，buy > 50% → 买入提醒
+  Round 0: Bull vs Bear 单轮对抗辩论（2 LLM 并行）
+  Round 1: 5 Agent 并行独立打分（5 LLM 并行）
+  最终裁决: 角色权重加成，buy 权重 > 50% → 买入提醒
+
+LLM 调用总数：2 + 5 + 1（最终摘要）= 8 次（原 21 次）
 """
 import json
 import logging
@@ -23,7 +24,7 @@ from .data_layer import safe_json, fetch_stock_data, fetch_sentiment, fetch_sect
 logger = logging.getLogger(__name__)
 
 
-# ---------- 7 位分析师定义 ----------
+# ---------- 分析师数据类 ----------
 
 class AnalystAgent:
     def __init__(self, name: str, role: str, tools: Dict[str, Tuple[str, dict]], philosophy: str):
@@ -31,13 +32,9 @@ class AnalystAgent:
         self.role = role
         self.tools = tools
         self.philosophy = philosophy
-        self.round1_score = 0
-        self.round1_vote = "hold"
-        self.round1_reason = ""
-        self.round2_score = 0
-        self.round2_vote = "hold"
-        self.round2_cooperate = False
-        self.round2_reason = ""
+        self.score = 0
+        self.vote = "hold"
+        self.reason = ""
 
 
 # ---------- LLM 创建 ----------
@@ -51,9 +48,10 @@ def _create_debate_llm() -> ChatOpenAI:
     return ChatOpenAI(**kwargs)
 
 
-# ---------- 8 位分析师定义 ----------
+# ---------- 5 位分析师定义 ----------
 
 def _build_analysts() -> List[AnalystAgent]:
+    """5 位核心分析师（精简版，加速辩论）"""
     return [
         AnalystAgent(
             name="价值派·格雷厄姆",
@@ -74,34 +72,16 @@ def _build_analysts() -> List[AnalystAgent]:
             philosophy="以合理价格买入优质企业。高毛利、高净利、稳定分红是好公司的标志。宁可贵一点买好公司，不买便宜的烂公司。"
         ),
         AnalystAgent(
-            name="市场派·林奇",
-            role="市场分析师",
-            tools={"stk_market_value": "市值信息", "stk_survey": "机构调研"},
-            philosophy="市值反映市场共识。被机构频繁调研的公司往往有催化剂。关注市值与行业地位的匹配度。"
-        ),
-        AnalystAgent(
             name="责任派·ESG分析师",
             role="ESG分析师",
             tools={"miotech_esg_rating": "妙盈ESG", "chindices_esg_rating": "华证ESG", "syntaogf_esg_rating": "商道融绿ESG"},
             philosophy="环境社会和治理表现优秀的企业长期更有韧性。ESG评级高的企业风险更低，值得长期持有。"
         ),
         AnalystAgent(
-            name="情绪派·新闻猎手",
-            role="舆情分析师",
-            tools={"get_news_sentiment": "市场情绪评分"},
-            philosophy="市场情绪是短期风向标。恐慌时贪婪，狂热时恐惧。情绪极度负面的优质股可能是抄底机会。"
-        ),
-        AnalystAgent(
             name="风控官·塔勒布",
             role="风险管理官",
             tools={},
             philosophy="黑天鹅永远存在。不依赖任何单一维度的判断。综合所有分析师的结论，识别尾部风险。宁可错过，不要做错。"
-        ),
-        AnalystAgent(
-            name="技术派·欧奈尔",
-            role="技术/趋势分析师",
-            tools={"sector_trend": "概念板块涨跌TOP5", "industry_trend": "行业板块涨跌TOP5"},
-            philosophy="价格反映一切信息。板块轮动和价格趋势比基本面更重要。所属板块正在上涨的股票动能强，板块下跌则个股难独善其身。"
         ),
     ]
 
@@ -177,35 +157,32 @@ def _classify_stock_type(data: Dict[str, Any]) -> str:
 
 
 def _compute_role_weights(data: Dict[str, Any]) -> Dict[str, float]:
-    """成长股放大成长派/技术派，削弱价值派；价值股反之"""
+    """成长股放大成长派权重，削弱价值派；价值股反之"""
     stype = _classify_stock_type(data)
 
     if stype == "growth":
         return {
-            "价值派": 0.3, "成长派": 2.5, "质量派": 0.3,
-            "市场派": 1.5, "责任派": 1.0, "情绪派": 1.0,
-            "风控官": 1.0, "技术派": 2.0,
+            "价值派": 0.3, "成长派": 2.5, "质量派": 1.0,
+            "责任派": 1.0, "风控官": 1.0,
         }
     elif stype == "value":
         return {
             "价值派": 2.0, "成长派": 0.5, "质量派": 1.5,
-            "市场派": 1.0, "责任派": 1.0, "情绪派": 1.0,
-            "风控官": 1.0, "技术派": 0.5,
+            "责任派": 1.0, "风控官": 1.0,
         }
     else:
         return {
             "价值派": 1.0, "成长派": 1.0, "质量派": 1.0,
-            "市场派": 1.0, "责任派": 1.0, "情绪派": 1.0,
-            "风控官": 1.0, "技术派": 1.0,
+            "责任派": 1.0, "风控官": 1.0,
         }
 
 
 # ---------- Agent 观点生成 ----------
 
-def _agent_round1(agent_def: AnalystAgent, stock_name: str, stock_code: str,
-                  data_pieces: Dict[str, Any], stock_data_summary: str,
-                  bull_bear_transcript: str = "") -> Tuple[str, int, str]:
-    """Round 1: 独立打分（含 Bull/Bear 辩论结论）"""
+def _agent_vote(agent_def: AnalystAgent, stock_name: str, stock_code: str,
+                 data_pieces: Dict[str, Any], stock_data_summary: str,
+                 bull_bear_transcript: str = "") -> Tuple[str, int, str]:
+    """Agent 独立打分（含 Bull/Bear 辩论结论）"""
     llm = _create_debate_llm()
 
     debate_section = ""
@@ -245,100 +222,24 @@ def _agent_round1(agent_def: AnalystAgent, stock_name: str, stock_code: str,
             if text.startswith("json"):
                 text = text[4:]
         result = json.loads(text)
-        agent_def.round1_score = int(result.get("score", 0))
-        agent_def.round1_vote = result.get("vote", "hold").lower()
-        agent_def.round1_reason = result.get("reason", "")
-        return agent_def.round1_vote, agent_def.round1_score, agent_def.round1_reason
+        agent_def.score = int(result.get("score", 0))
+        agent_def.vote = result.get("vote", "hold").lower()
+        agent_def.reason = result.get("reason", "")
+        return agent_def.vote, agent_def.score, agent_def.reason
     except Exception as e:
-        logger.warning(f"{agent_def.name} Round1 失败: {e}")
-        agent_def.round1_score = 0
-        agent_def.round1_vote = "hold"
-        agent_def.round1_reason = "分析失败"
+        logger.warning(f"{agent_def.name} 打分失败: {e}")
+        agent_def.score = 0
+        agent_def.vote = "hold"
+        agent_def.reason = "分析失败"
         return "hold", 0, "分析失败"
-
-
-def _agent_round2(agent_def: AnalystAgent, stock_name: str, stock_code: str,
-                   all_r1_scores: Dict[str, Tuple[str, int, str]],
-                   stock_data_summary: str) -> Tuple[str, int, str, bool]:
-    """Round 2: 囚徒困境 — 看到别人的分后，决定合作还是背叛"""
-    llm = _create_debate_llm()
-
-    votes = [v for v, _, _ in all_r1_scores.values()]
-    buy_count = votes.count("buy")
-    sell_count = votes.count("sell")
-    hold_count = votes.count("hold")
-
-    if buy_count >= sell_count and buy_count >= hold_count:
-        majority = "buy"
-    elif sell_count >= buy_count and sell_count >= hold_count:
-        majority = "sell"
-    else:
-        majority = "hold"
-
-    others_summary = "\n".join(
-        f"  {name}: 评分{score}, 投票{vote}, 理由:{reason}"
-        for name, (vote, score, reason) in all_r1_scores.items()
-        if name != agent_def.name
-    )
-
-    prompt = f"""你是{agent_def.name}（{agent_def.role}）。
-
-【股票】{stock_name}（{stock_code}）
-
-【你 Round 1 的观点】
-评分: {agent_def.round1_score}
-投票: {agent_def.round1_vote}
-理由: {agent_def.round1_reason}
-
-【其他分析师的 Round 1 观点】
-{others_summary}
-
-【多数派方向】{majority}（buy {buy_count}票, sell {sell_count}票, hold {hold_count}票）
-
-【囚徒困境规则】
-现在你可以看到所有人的打分。
-- **合作**：向多数派方向靠拢（修正你的评分），获得 1.5x 投票权重
-- **背叛**：坚持你 Round 1 的判断不变，保持 1.0x 权重
-
-合作的好处是你的投票更有影响力；风险是如果多数派错了，你也要跟着错。
-背叛的好处是你保持独立判断；风险是你的投票权重低，影响力小。
-
-【再次审视数据】
-{stock_data_summary}
-
-返回 JSON：
-{{"score": 最终评分(-100~100), "vote": "buy/hold/sell", "cooperate": true/false, "reason": "一句话说明为何合作或背叛"}}"""
-
-    try:
-        resp = llm.invoke([SystemMessage(content=prompt)])
-        text = resp.content if hasattr(resp, "content") else str(resp)
-        text = text.strip()
-        if text.startswith("```"):
-            text = text.split("```", 2)[1]
-            if text.startswith("json"):
-                text = text[4:]
-        result = json.loads(text)
-        agent_def.round2_score = int(result.get("score", agent_def.round1_score))
-        agent_def.round2_vote = result.get("vote", agent_def.round1_vote).lower()
-        agent_def.round2_cooperate = bool(result.get("cooperate", False))
-        agent_def.round2_reason = result.get("reason", "")
-        return agent_def.round2_vote, agent_def.round2_score, agent_def.round2_reason, agent_def.round2_cooperate
-    except Exception as e:
-        logger.warning(f"{agent_def.name} Round2 失败: {e}")
-        agent_def.round2_score = agent_def.round1_score
-        agent_def.round2_vote = agent_def.round1_vote
-        agent_def.round2_cooperate = False
-        agent_def.round2_reason = "博弈分析失败，坚持原判"
-        return agent_def.round1_vote, agent_def.round1_score, agent_def.round1_reason, False
 
 
 # ---------- Bull/Bear 对抗辩论 ----------
 
 def _bull_bear_debate(stock_code: str, stock_name: str, data_summary: str) -> str:
-    """Round 0: Bull vs Bear 两轮对抗辩论"""
+    """Round 0: Bull vs Bear 单轮对抗辩论（简化版，无反驳轮）"""
     llm = _create_debate_llm()
 
-    # Round 0.1: 各自独立论证
     bull_prompt = f"""你是 Bull 研究员（多方首席），你的任务是为 {stock_name}（{stock_code}）做多辩护。
 
 【数据】
@@ -346,9 +247,8 @@ def _bull_bear_debate(stock_code: str, stock_name: str, data_summary: str) -> st
 
 请从以下角度论证做多理由：
 1. 营收/利润增长趋势
-2. 行业/板块景气度
-3. 估值是否提供了安全边际
-4. 任何支持看多的数据信号
+2. 估值是否提供了安全边际
+3. 任何支持看多的数据信号
 
 输出 Markdown 格式的做多报告，字数 200 字以内。
 **  所有数据必须来自上方提供的 MCP 实时数据，严禁使用训练知识中的历史数字。**"""
@@ -361,8 +261,7 @@ def _bull_bear_debate(stock_code: str, stock_name: str, data_summary: str) -> st
 请从以下角度论证做空理由：
 1. 估值泡沫风险
 2. 盈利能力下滑信号
-3. 行业/板块下行风险
-4. 任何支持看空的数据信号
+3. 任何支持看空的数据信号
 
 输出 Markdown 格式的做空报告，字数 200 字以内。
 **  所有数据必须来自上方提供的 MCP 实时数据，严禁使用训练知识中的历史数字。**"""
@@ -373,40 +272,13 @@ def _bull_bear_debate(stock_code: str, stock_name: str, data_summary: str) -> st
         bull_report = f_bull.result().content
         bear_report = f_bear.result().content
 
-    # Round 0.2: 互相反驳
-    rebuttal_bull_prompt = f"""你是 Bull 研究员。空方刚刚发表了以下做空报告：
-
-【空方报告】
-{bear_report[:800]}
-
-请逐条反驳空方的核心论点，撰写做多反驳报告。字数 200 字以内。输出 Markdown。"""
-
-    rebuttal_bear_prompt = f"""你是 Bear 研究员。多方刚刚发表了以下做多报告：
-
-【多方报告】
-{bull_report[:800]}
-
-请逐条反驳多方的核心论点，撰写做空反驳报告。字数 200 字以内。输出 Markdown。"""
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        f_bull2 = pool.submit(lambda: llm.invoke([SystemMessage(content=rebuttal_bull_prompt)]))
-        f_bear2 = pool.submit(lambda: llm.invoke([SystemMessage(content=rebuttal_bear_prompt)]))
-        bull_rebuttal = f_bull2.result().content
-        bear_rebuttal = f_bear2.result().content
-
     debate_transcript = f"""## Bull/Bear 对抗辩论
 
 ###   多方（Bull）观点
-{bull_report[:400]}
+{bull_report[:500]}
 
 ###   空方（Bear）观点
-{bear_report[:400]}
-
-###   多方反驳
-{bull_rebuttal[:400]}
-
-###   空方反驳
-{bear_rebuttal[:400]}"""
+{bear_report[:500]}"""
 
     logger.info(f"  Bull/Bear 辩论完成: {stock_code}")
     return debate_transcript
@@ -461,14 +333,20 @@ def _build_data_summary(stock_data: Dict[str, Any], sentiment: Dict[str, Any]) -
 # ---------- 单只股票辩论主流程 ----------
 
 def debate_stock(stock_code: str) -> Dict[str, Any]:
-    """对单只股票执行完整辩论流程
+    """对单只股票执行辩论投票
+
+    简化流程（5 Agent + 单轮投票 + Bull/Bear 对抗）：
+      1. 获取数据
+      2. Bull/Bear 单轮对抗（2 LLM 并行）
+      3. 5 Agent 独立打分（5 LLM 并行）
+      4. 角色权重加权 → 最终裁决
 
     Returns:
         {stock_code, stock_name, stock_type, buy_signal, final_score,
-         bull_bear_debate, round1, round2, role_weights, weight_breakdown, vote_summary, sentiment}
+         bull_bear_debate, agent_votes, role_weights, weight_breakdown, vote_summary, sentiment}
     """
     analysts = _build_analysts()
-    logger.info(f"开始 8 Agent 辩论: {stock_code}")
+    logger.info(f"开始 5 Agent 辩论: {stock_code}")
 
     # 获取数据（统一从 data_layer）
     stock_data = fetch_stock_data(stock_code)
@@ -476,70 +354,49 @@ def debate_stock(stock_code: str) -> Dict[str, Any]:
     sentiment = fetch_sentiment()
     data_summary = _build_data_summary(stock_data, sentiment)
 
-    # Round 0: Bull/Bear 对抗辩论
-    logger.info(f"  Round 0: Bull vs Bear 对抗辩论...")
+    # Bull/Bear 单轮对抗（2 LLM 并行）
+    logger.info(f"  Bull vs Bear 对抗辩论...")
     bull_bear_transcript = _bull_bear_debate(stock_code, stock_name, data_summary)
 
-    # Round 1: 独立打分
-    logger.info(f"  Round 1: 8 Agent 独立打分...")
-    round1_results: Dict[str, Tuple[str, int, str]] = {}
+    # 5 Agent 独立打分（并行）
+    logger.info(f"  5 Agent 独立打分...")
+    agent_votes: Dict[str, Dict] = {}
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {}
         for a in analysts:
-            futures[pool.submit(_agent_round1, a, stock_name, stock_code, {},
+            futures[pool.submit(_agent_vote, a, stock_name, stock_code, {},
                                 data_summary, bull_bear_transcript)] = a.name
 
         for f in as_completed(futures):
             name = futures[f]
             vote, score, reason = f.result()
-            round1_results[name] = (vote, score, reason)
-
-    # Round 2: 囚徒困境
-    logger.info(f"  Round 2: 囚徒困境博弈...")
-    round2_results: Dict[str, Dict] = {}
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures2 = {}
-        for a in analysts:
-            futures2[pool.submit(_agent_round2, a, stock_name, stock_code,
-                                 round1_results, data_summary)] = a.name
-
-        for f in as_completed(futures2):
-            name = futures2[f]
-            vote, score, reason, cooperate = f.result()
-            round2_results[name] = {
-                "score": score, "vote": vote, "cooperate": cooperate, "reason": reason
-            }
+            agent_votes[name] = {"score": score, "vote": vote, "reason": reason}
 
     # 动态角色权重
     role_weights = _compute_role_weights(stock_data)
 
-    # 最终裁决
+    # 最终加权裁决
     weighted_votes = {"buy": 0, "hold": 0, "sell": 0}
     total_weight = 0
     total_score = 0
     weight_breakdown = {}
 
-    for name, r2 in round2_results.items():
+    for name, v in agent_votes.items():
         rw = 1.0
         for role_prefix, w in role_weights.items():
             if name.startswith(role_prefix):
                 rw = w
                 break
-        cooperate_bonus = 1.5 if r2["cooperate"] else 1.0
-        final_w = round(rw * cooperate_bonus, 2)
-        weight_breakdown[name] = {"role_weight": rw, "cooperate_bonus": cooperate_bonus, "final_weight": final_w}
+        final_w = round(rw, 2)
+        weight_breakdown[name] = {"role_weight": rw, "final_weight": final_w}
 
-        weighted_votes[r2["vote"]] += final_w
+        weighted_votes[v["vote"]] += final_w
         total_weight += final_w
-        total_score += r2["score"] * final_w
+        total_score += v["score"] * final_w
 
     final_score = round(total_score / total_weight, 1) if total_weight > 0 else 0
     buy_signal = weighted_votes["buy"] > (total_weight / 2)
-
-    r1_simple = {name: {"score": s, "vote": v, "reason": r}
-                 for name, (v, s, r) in round1_results.items()}
 
     result = {
         "stock_code": stock_code,
@@ -548,8 +405,7 @@ def debate_stock(stock_code: str) -> Dict[str, Any]:
         "buy_signal": buy_signal,
         "final_score": final_score,
         "bull_bear_debate": bull_bear_transcript,
-        "round1": r1_simple,
-        "round2": round2_results,
+        "agent_votes": agent_votes,
         "role_weights": {k: round(v, 1) for k, v in role_weights.items()},
         "weight_breakdown": weight_breakdown,
         "vote_summary": {
@@ -558,8 +414,6 @@ def debate_stock(stock_code: str) -> Dict[str, Any]:
             "sell_weight": round(weighted_votes["sell"], 1),
             "total": round(total_weight, 1),
             "buy_ratio": round(weighted_votes["buy"] / total_weight * 100, 1) if total_weight > 0 else 0,
-            "cooperators": [n for n, r2 in round2_results.items() if r2["cooperate"]],
-            "defectors": [n for n, r2 in round2_results.items() if not r2["cooperate"]],
         },
         "sentiment": sentiment,
     }
