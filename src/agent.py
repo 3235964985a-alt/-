@@ -398,19 +398,22 @@ def _fmt_cap(value):
 
 
 def get_market_overview() -> str:
-    """获取每日大盘概览
+    """获取每日大盘综合报告
 
-    采集核心龙头股市值+价格数据，由 LLM 汇总生成当日盘面快照。
-    可在对话中问'今天大盘怎么样'触发，也可从侧边栏一键调用。
+    采集三路数据：
+    1. 核心龙头股（MCP 实时行情）
+    2. 概念/行业板块涨跌 TOP5（AKShare）
+    3. 财联社/雪球/华尔街见闻热点新闻（NewsNow）
+    由 LLM 汇总生成「指数·板块·新闻」三位一体的综合报告。
 
     Returns:
-        格式化的市场概览字符串
+        格式化的综合市场报告
     """
     import json
 
-    llm = _create_llm(temperature=0.2)
+    llm = _create_llm(temperature=0.3)
 
-    # 核心标的：覆盖消费/新能源/金融/科技
+    # ── 1. 龙头股数据 ──
     BENCHMARK_STOCKS = {
         "600519": "消费·茅台",
         "300750": "新能源·宁德时代",
@@ -420,44 +423,86 @@ def get_market_overview() -> str:
         "002415": "科技·海康威视",
         "601012": "新能源·隆基绿能",
     }
-
     stock_data = []
     for code, label in BENCHMARK_STOCKS.items():
         try:
             raw = _call_mcp_tool_sync("stk_market_value", {"security_code": code})
             d = _safe_json(raw)
             if d.get("security_name"):
-                cap = d.get("total_market_cap", 0)
-                change_pct = d.get("change_pct", d.get("chg_pct", None))  # 涨跌幅
                 stock_data.append({
-                    "code": code,
                     "name": d.get("security_name", code),
                     "label": label,
                     "price": d.get("close_price", "--"),
-                    "cap": _fmt_cap(cap),
-                    "change": f"{change_pct:+.2f}%" if isinstance(change_pct, (int, float)) else "--",
+                    "cap": _fmt_cap(d.get("total_market_cap", 0)),
                 })
         except Exception as e:
             logger.warning(f"获取 {code} 数据失败: {e}")
 
-    if not stock_data:
-        return "暂无市场数据"
+    # ── 2. 板块数据 ──
+    sector_text = get_sector_overview_text()
 
-    # LLM 汇总
-    data_text = json.dumps(stock_data, ensure_ascii=False, indent=2)
-    prompt = f"""你是一个专业的大盘分析师。以下是今日核心龙头股数据（基于MCP实时行情）：
+    # ── 3. 新闻数据 ──
+    news_text = _fetch_market_news()
 
-{data_text}
+    # ── LLM 汇总 ──
+    stock_json = json.dumps(stock_data, ensure_ascii=False, indent=2)
+    prompt = f"""你是一个专业的金融市场分析师。以下是今日A股的多维度实时数据，请生成一份综合市场报告。
 
-请生成一份精炼的「今日大盘概览」，包含：
-1. 核心指数风向（根据权重股表现推断大盘情绪：偏暖/偏冷/震荡）
-2. 分行业简评（消费/金融/新能源/科技各一句话）
-3. 一句话市场总结
+【核心龙头股行情】
+{stock_json}
 
-输出风格：简洁、有数据支撑，3-5句话即可。"""
+【板块全景】
+{sector_text}
+
+【市场热点新闻】
+{news_text}
+
+请按以下结构生成「今日市场综合报告」：
+
+## 一、核心指数风向
+（根据权重股和板块涨跌比判断市场情绪：偏暖/偏冷/震荡，2-3句）
+
+## 二、板块轮动分析
+（概念板块+行业板块各1段，哪些涨/哪些跌，领涨龙头，资金动向）
+
+## 三、热点新闻速览
+（从新闻中提炼3-5条最关键的市场资讯，标注来源）
+
+## 四、市场总结与展望
+（综合个股+板块+新闻，给出一句话市场判断）
+
+输出要求：专业但不晦涩，每条数据注明来源，约300-500字。"""
 
     response = llm.invoke(prompt)
     return response.content or "无法生成大盘概览"
+
+
+def _fetch_market_news() -> str:
+    """获取财联社+华尔街见闻+雪球的最新热点（供大盘报告使用）"""
+    try:
+        from .news_mcp import _fetch_source, _parse_items, NEWS_SOURCES
+        results = {}
+        for src_name in ["财联社", "华尔街见闻", "雪球"]:
+            src_id = NEWS_SOURCES.get(src_name)
+            if not src_id:
+                continue
+            data = _fetch_source(src_id)
+            if data:
+                items = _parse_items(data)
+                results[src_name] = items[:8]
+        if not results:
+            return "暂无新闻数据"
+
+        lines = []
+        for name, items in results.items():
+            lines.append(f"\n### {name}")
+            for item in items:
+                title = item.get("title", "")[:50]
+                lines.append(f"- {title}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"获取新闻数据失败: {e}")
+        return "新闻数据暂不可用"
 
 
 @tool
