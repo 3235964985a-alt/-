@@ -147,12 +147,16 @@ _vectorstore: Chroma = None
 
 
 def _get_embeddings():
-    """获取嵌入模型"""
-    kwargs = {"model": os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")}
+    """获取嵌入模型（兼容 DeepSeek API）"""
+    model = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")
+    kwargs = {"model": model}
     if OPENAI_API_KEY:
         kwargs["openai_api_key"] = OPENAI_API_KEY
     if OPENAI_BASE_URL:
-        kwargs["openai_api_base"] = OPENAI_BASE_URL
+        url = OPENAI_BASE_URL.rstrip("/")
+        if not url.endswith("/v1"):
+            url += "/v1"
+        kwargs["openai_api_base"] = url
     return OpenAIEmbeddings(**kwargs)
 
 
@@ -214,8 +218,13 @@ def retrieve_knowledge(query: str, k: int = 3) -> List[Tuple[str, dict]]:
     if vectorstore is None:
         return []
 
-    docs = vectorstore.similarity_search(query, k=k)
-    return [(doc.page_content, doc.metadata) for doc in docs]
+    try:
+        docs = vectorstore.similarity_search(query, k=k)
+        return [(doc.page_content, doc.metadata) for doc in docs]
+    except Exception as e:
+        logger.warning(f"RAG检索失败（Embedding可能不兼容）: {e}，已降级")
+        init_rag.cache_clear() if hasattr(init_rag, "cache_clear") else None
+        return []
 
 
 def retrieve_knowledge_as_context(query: str, k: int = 3) -> str:
