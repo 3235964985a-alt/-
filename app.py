@@ -189,32 +189,70 @@ with st.sidebar:
                         tmp.write(uploaded_file.read())
                         tmp_path = tmp.name
 
-                    holdings = parse_portfolio_from_image(tmp_path)
+                    result = parse_portfolio_from_image(tmp_path)
                     os.unlink(tmp_path)
 
+                    holdings = result.get("holdings", [])
+                    summary = result.get("summary", {})
+                    notes = result.get("notes", [])
+
                     if holdings:
-                        st.success(f"识别到 {len(holdings)} 只持仓股")
-                        # 显示识别结果
+                        st.success(f"AI 识别完成：{len(holdings)} 只持仓股")
+                        # 显示摘要
+                        if summary:
+                            parts = []
+                            if summary.get("total_asset"):
+                                parts.append(f"总资产: {summary['total_asset']}")
+                            if summary.get("total_profit"):
+                                parts.append(f"总盈亏: {summary['total_profit']}")
+                            if summary.get("stock_count"):
+                                parts.append(f"持股: {summary['stock_count']}只")
+                            if parts:
+                                st.caption(" | ".join(parts))
+
+                        # 显示每只股票
                         for h in holdings:
                             code = h.get("code", "")
                             name = h.get("name", "")
                             shares = h.get("shares", "")
+                            cost = h.get("cost", "")
+                            price = h.get("price", "")
                             profit = h.get("profit", "")
-                            info_parts = [name, f"`{code}`"]
+                            profit_pct = h.get("profit_pct", "")
+
+                            info_parts = []
+                            if name:
+                                info_parts.append(f"**{name}**")
+                            if code:
+                                info_parts.append(f"`{code}`")
+                            else:
+                                info_parts.append("`(代码待补)`")
                             if shares:
                                 info_parts.append(f"{shares}股")
+                            if cost:
+                                info_parts.append(f"成本{cost}")
+                            if price:
+                                info_parts.append(f"现价{price}")
                             if profit:
                                 info_parts.append(f"盈亏{profit}")
+                            if profit_pct:
+                                info_parts.append(f"({profit_pct})")
                             st.write(f"• {' · '.join(info_parts)}")
 
-                        # 存入 trigger_ocr_analysis 等待用户确认
+                        if notes:
+                            with st.expander("  备注"):
+                                for n in notes:
+                                    st.caption(f"• {n}")
+
+                        # 存入 trigger_ocr_analysis
                         codes = [h["code"] for h in holdings if h.get("code")]
-                        if codes:
-                            st.session_state.ocr_codes = codes
-                            st.session_state.trigger_ocr_analysis = True
-                            st.rerun()
+                        st.session_state.ocr_holdings = holdings  # 完整持仓
+                        st.session_state.ocr_summary = summary
+                        st.session_state.ocr_codes = codes if codes else ["000001"]  # 兜底
+                        st.session_state.trigger_ocr_analysis = True
+                        st.rerun()
                     else:
-                        st.warning("未识别到股票代码，请确认截图中包含6位数字代码")
+                        st.warning("AI 未能识别到持仓股票。请确认截图为券商持仓页面，并重试。")
                 except Exception as e:
                     st.error(f"识别失败：{e}")
         if "ocr_codes" in st.session_state and st.session_state.ocr_codes:
