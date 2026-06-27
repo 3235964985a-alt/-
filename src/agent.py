@@ -25,6 +25,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from .config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 from .mcp_tools import STOCK_TOOLS, ANALYSIS_TOOLS, ESG_TOOLS, TOOL_MAP, _call_mcp_tool_sync
 from .news_mcp import NEWS_TOOLS, NEWS_TOOL_MAP
+from .sector_data import get_sector_overview_text
 from .prompts import (
     SUPERVISOR_PROMPT,
     STOCK_AGENT_PROMPT,
@@ -224,7 +225,7 @@ def build_graph() -> StateGraph:
     workflow.add_node(AGENT_NODES["supervisor"], create_supervisor_node())
     workflow.add_node(
         AGENT_NODES["stock_agent"],
-        _create_worker_node("stock_agent", STOCK_AGENT_PROMPT, STOCK_TOOLS + [market_overview_tool], use_rag=False),
+        _create_worker_node("stock_agent", STOCK_AGENT_PROMPT, STOCK_TOOLS + [market_overview_tool, sector_overview_tool], use_rag=False),
     )
     workflow.add_node(
         AGENT_NODES["analysis_agent"],
@@ -461,8 +462,14 @@ def get_market_overview() -> str:
 
 @tool
 def market_overview_tool(dummy: str = "") -> str:
-    """获取当日A股大盘概览（核心龙头股市值+行情）。无参数，直接调用。"""
+    """获取当日A股大盘概览（核心龙头股市值+行情+板块全景）。无参数，直接调用。"""
     return get_market_overview()
+
+
+@tool
+def sector_overview_tool(dummy: str = "") -> str:
+    """获取A股概念板块和行业板块实时行情（涨跌TOP5、领涨股票、市场广度）。无参数，直接调用。"""
+    return get_sector_overview_text()
 
 
 def chat(message: str, thread_id: str = "default") -> Dict[str, Any]:

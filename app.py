@@ -96,7 +96,7 @@ with st.sidebar:
     with col1:
         st.metric("  Agent", "5")
     with col2:
-        st.metric("  Tools", "21")
+        st.metric("  Tools", "22")
 
     st.markdown("---")
 
