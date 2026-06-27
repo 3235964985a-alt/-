@@ -102,10 +102,11 @@ def _parse_items(data: Dict) -> List[Dict]:
 
 def _format_source(data: Dict) -> str:
     """格式化单个源输出"""
+    source_name = _id_to_name(data.get('id', ''))
     items = _parse_items(data)
-    lines = [f"【{data.get('id', '')}】更新时间: {data.get('updatedTime', '未知')}"]
+    lines = [f"来源：{source_name} | 更新时间: {data.get('updatedTime', '未知')}"]
     for i, item in enumerate(items, 1):
-        lines.append(f"{i}. {item['title']}")
+        lines.append(f"{i}. {item['title']} 【来源：{source_name}】")
         if item.get("url"):
             lines.append(f"   {item['url']}")
     return "\n".join(lines)
@@ -117,10 +118,18 @@ def _format_multi(results: Dict[str, List]) -> str:
     for name, items in results.items():
         if not items:
             continue
-        parts.append(f"\n### {name}")
+        parts.append(f"\n### 【来源：{name}】")
         for i, item in enumerate(items, 1):
-            parts.append(f"{i}. {item['title']}")
+            parts.append(f"{i}. {item['title']} 【来源：{name}】")
     return "\n".join(parts) if parts else "暂无新闻数据"
+
+
+def _id_to_name(source_id: str) -> str:
+    """根据 source_id 反查中文名"""
+    for name, sid in NEWS_SOURCES.items():
+        if sid == source_id:
+            return name
+    return source_id
 
 
 def _call_newsnow_sync(tool_name: str, arguments: dict) -> str:
