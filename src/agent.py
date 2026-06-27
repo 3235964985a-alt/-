@@ -302,17 +302,110 @@ def get_graph() -> StateGraph:
 # ---------- 对话接口 ----------
 
 def analyze_watchlist(stock_codes: List[str]) -> str:
-    """批量分析自选股，生成含 7-Agent 辩论投票的对比报告
+    """批量分析自选股，生成含数据+舆情+ESG的原始报告
 
-    流程：
-    1. 7 Agent 两轮囚徒困境辩论（并行）
-    2. LLM 汇总生成含投票明细+买入信号的报告
+    每只股票调用：市值、综合评估、ESG评级；
+    同时获取市场舆情情绪。
 
     Args:
         stock_codes: 股票代码列表
 
     Returns:
-        格式化的分析报告字符串（含辩论结果）
+        格式化的分析报告（Markdown，含股价、数据、舆情、ESG）
+    """
+    import json
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from .news_mcp import get_news_sentiment
+
+    llm = _create_llm(temperature=0.3)
+    stock_codes = stock_codes[:10]
+
+    # 并行：数据获取 + 舆情获取
+    with ThreadPoolExecutor(max_workers=6) as outer:
+        f_sentiment = outer.submit(get_news_sentiment)
+
+        def _fetch_one_stock(code):
+            info = {"code": code, "name": code}
+            with ThreadPoolExecutor(max_workers=3) as inner:
+                f_mv = inner.submit(_call_mcp_tool_sync, "stk_market_value", {"security_code": code})
+                f_ev = inner.submit(_call_mcp_tool_sync, "stk_eval", {"security_code": code})
+                f_esg = inner.submit(_call_mcp_tool_sync, "miotech_esg_rating", {"security_code": code})
+                try:
+                    info["market"] = _safe_json(f_mv.result(timeout=15))
+                    info["name"] = info["market"].get("security_name", code)
+                except Exception:
+                    info["market"] = {}
+                try:
+                    info["eval"] = _safe_json(f_ev.result(timeout=15))
+                except Exception:
+                    info["eval"] = {}
+                try:
+                    info["esg"] = _safe_json(f_esg.result(timeout=15))
+                except Exception:
+                    info["esg"] = {}
+            return code, info
+
+        stock_data = {}
+
+        with ThreadPoolExecutor(max_workers=min(len(stock_codes), 5)) as pool:
+            futures = {pool.submit(_fetch_one_stock, c): c for c in stock_codes}
+            for f in as_completed(futures):
+                code, info = f.result()
+                stock_data[code] = info
+
+        try:
+            sentiment_raw = f_sentiment.result(timeout=20)
+            sentiment = json.loads(sentiment_raw) if isinstance(sentiment_raw, str) else sentiment_raw
+        except Exception:
+            sentiment = {"error": "舆情获取失败"}
+
+    # 构建数据摘要
+    summary_lines = []
+    for code, info in stock_data.items():
+        mv = info.get("market", {})
+        ev = info.get("eval", {})
+        esg = info.get("esg", {})
+        summary_lines.append(
+            f"| {info['name']}({code}) "
+            f"| 收盘 {mv.get('close_price','?')} "
+            f"| 市值 {_fmt_cap(mv.get('total_market_cap','?'))} "
+            f"| ESG {esg.get('esg_rate','?')} "
+            f"| 评估: {str(ev)[:100]} |"
+        )
+
+    report_prompt = f"""你是一位资深投资分析师。以下是自选股数据和市场舆情：
+
+【股票数据】
+{chr(10).join(summary_lines)}
+
+【市场舆情情绪】
+{json.dumps(sentiment, ensure_ascii=False, indent=2)[:2000]}
+
+请生成一份专业的自选股分析报告，**必须包含以下所有板块**：
+
+1. **概览** — 组合整体特征（行业分布、市值规模等）
+2. **估值对比** — 各股票估值水平横向对比
+3. **ESG 表现** — ESG评级对比
+4. **舆情分析** — 逐只股票打分（-100~100），结合市场情绪和个股关联新闻
+5. **综合建议** — 基于以上全部数据给出投资参考（仅供参考，不构成投资意见）
+
+用 Markdown 格式输出，语言专业但不晦涩。不要编造报告日期、分析师署名等元信息。"""
+
+    response = llm.invoke([SystemMessage(content=report_prompt)])
+    return response.content
+
+
+def debate_watchlist(stock_codes: List[str]) -> str:
+    """8-Agent 囚徒困境辩论投票，生成买卖建议报告
+
+    仅在用户明确要求买卖建议时调用。
+    包含：Bull/Bear 对抗辩论 → 独立打分 → 囚徒困境 → 加权投票 → 买入提醒。
+
+    Args:
+        stock_codes: 股票代码列表
+
+    Returns:
+        辩论投票报告（Markdown，含投票明细和买入信号）
     """
     import json
     from .debate_agent import debate_batch
@@ -320,71 +413,63 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
     llm = _create_llm(temperature=0.3)
     stock_codes = stock_codes[:10]
 
-    # 7 Agent 辩论（并行）
     debates = debate_batch(stock_codes)
-
-    # 买入信号股（提前计算）
     buy_signals = [d for d in debates if d["buy_signal"]]
 
-    # 每只股票独立生成分析报告
     reports = []
     for d in debates:
         code = d["stock_code"]
         name = d["stock_name"]
         vs = d["vote_summary"]
         signal = "**  买入提醒**" if d["buy_signal"] else ""
-
-        # 该股投票明细（含角色权重）
         type_label = {"growth": "成长型", "value": "价值型", "balanced": "平衡型"}.get(d.get("stock_type", "balanced"), "平衡型")
-        rw = d.get("role_weights", {})
+
         weight_col = []
         for agent_name, r2 in d["round2"].items():
             c_flag = "  合作" if r2["cooperate"] else "  坚持"
             wb = d.get("weight_breakdown", {}).get(agent_name, {})
-            fw = wb.get("final_weight", rw.get(agent_name[:3], 1.0))
+            fw = wb.get("final_weight", 1.0)
             weight_col.append(
-                f"| {agent_name} | {c_flag} | {r2['vote']} | {r2['score']} | ×{fw} | {r2['reason']} |"
+                f"| {agent_name} | {c_flag} | {r2['vote']} | {r2['score']} | ×{fw:.1f} | {r2['reason']} |"
             )
 
-        single_report_prompt = f"""你是一位资深投资分析师。以下是 8 位分析师对 {name}({code}) 的辩论博弈结果：
+        debate_block = f"""### {name}（{code}） {signal}
 
-【股票类型】{type_label}（动态角色权重已调整，避免对该类型股票的系统性偏见）
+**  股票类型：{type_label}** | 最终得分: {d['final_score']} | 加权: buy {vs['buy_weight']}  hold {vs['hold_weight']}  sell {vs['sell_weight']}
 
 【Bull/Bear 对抗辩论】
-{d.get('bull_bear_debate', '')[:600]}
+{d.get('bull_bear_debate', '')[:500]}
 
-【投票结果】
-最终得分: {d['final_score']} | 加权: buy {vs['buy_weight']}  hold {vs['hold_weight']}  sell {vs['sell_weight']}
-合作者: {', '.join(vs['cooperators'])} | 坚持者: {', '.join(vs['defectors'])}
-
+【投票明细】
 | 分析师 | 立场 | 投票 | 评分 | 权重 | 理由 |
 |---|---|---|---|---|---|
 {chr(10).join(weight_col)}
 
-【要求】仅针对 {name}({code}) 一只股票，生成分析报告：
+"""
 
-1. **辩论总结** — Bull/Bear 对抗核心分歧 + 8位分析师的共识
-2. **估值与成长** — 价值派 vs 成长派 vs 技术派的博弈结论
-3. **ESG与质量** — ESG评级和基本面质量分析
-4. **情绪与风险** — 舆情信号 + 板块趋势 + 风控官的裁决
-5. **投票结论** — {signal if signal else "无买入信号"}，综合建议
+        single_report_prompt = f"""你是一位资深分析师。以下是 8 位分析师对 {name}({code}) 的辩论投票结果：
 
-用 Markdown 输出，语言专业但不晦涩。不要编造日期和分析师署名。"""
+{debate_block}
+
+请仅针对 {name}({code}) 一只股票，生成买卖建议：
+1. 投票结论 — buy/hold/sell 分布和信号
+2. 关键分歧 — 多方和空方核心观点
+3. 风险提示 — 潜在风险
+4. 综合建议 — 一句话建议（仅供参考）
+
+用 Markdown 输出，语言简洁。不要编造日期和分析师署名。"""
 
         resp = llm.invoke([SystemMessage(content=single_report_prompt)])
         text = resp.content if hasattr(resp, "content") else str(resp)
         reports.append(f"##   {name}（{code}）{signal}\n\n{text}")
 
-    # 最终汇总：每只股票独立报告
     final_report = "\n\n---\n\n".join(reports)
 
-    # 买入信号附录（报告末尾，仅供参考）
     if buy_signals:
         buy_list = ", ".join(f"**{d['stock_name']}**（{d['stock_code']}）" for d in buy_signals)
-        final_report += (
-            f"\n\n---\n\n"
-            f">   以上分析基于 8-Agent Bull/Bear 辩论 + 囚徒困境博弈，仅供参考，不构成投资建议。\n"
-            f"> 获 majority buy 票的股票：{buy_list}\n"
+        final_report = (
+            f">   买入提醒：以下股票获 8 Agent 辩论多数 buy 票：{buy_list}\n"
+            f"> 以上仅供参考，不构成投资建议。\n\n---\n\n{final_report}"
         )
 
     return final_report

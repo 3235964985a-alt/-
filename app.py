@@ -14,7 +14,7 @@ from datetime import datetime
 # 添加src到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.agent import chat, chat_stream, analyze_watchlist, get_market_overview
+from src.agent import chat, chat_stream, analyze_watchlist, debate_watchlist, get_market_overview
 
 
 # ---------- 页面配置 ----------
@@ -353,11 +353,12 @@ if st.session_state.get("trigger_ocr_analysis"):
             "content": f"分析持仓：{code_list}",
         })
 
+        # Step 1：原始分析报告（股价、数据、舆情、ESG）
         with st.chat_message("assistant"):
-            with st.spinner(f"  7-Agent 辩论中... 价值派vs成长派vs质量派..."):
+            with st.spinner(f"  正在分析 {len(codes)} 只持仓股..."):
                 try:
                     report = analyze_watchlist(codes)
-                    st.markdown('<span class="agent-badge badge-analysis">  持仓分析报告（含辩论）</span>', unsafe_allow_html=True)
+                    st.markdown('<span class="agent-badge badge-analysis">  持仓分析报告</span>', unsafe_allow_html=True)
                     st.markdown(report)
                     st.session_state.messages.append({
                         "role": "assistant",
@@ -372,6 +373,39 @@ if st.session_state.get("trigger_ocr_analysis"):
                         "content": error_msg,
                         "agent": "error",
                     })
+
+        # Step 2：询问是否需要买卖建议（8-Agent 辩论投票）
+        st.session_state["pending_debate_codes"] = codes
+        st.session_state["show_debate_prompt"] = True
+
+# 待确认的辩论提示
+if st.session_state.get("show_debate_prompt") and st.session_state.get("pending_debate_codes"):
+    codes = st.session_state["pending_debate_codes"]
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("  生成买卖建议（8-Agent 辩论投票）", type="primary", use_container_width=True):
+            st.session_state["show_debate_prompt"] = False
+            with st.spinner("  Bull/Bear 对抗辩论 + 8 Agent 囚徒困境投票..."):
+                try:
+                    debate_report = debate_watchlist(codes)
+                    # 检测买入信号
+                    if "买入提醒" in debate_report:
+                        st.warning("  买入信号！8 Agent 辩论多数 buy 票，详见报告")
+                    st.markdown('<span class="agent-badge badge-esg">  辩论投票报告</span>', unsafe_allow_html=True)
+                    st.markdown(debate_report)
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": f"【辩论投票】\n{debate_report}",
+                        "agent": "esg_agent",
+                    })
+                except Exception as e:
+                    st.error(f"辩论分析出错：{str(e)}")
+            st.rerun()
+    with col2:
+        if st.button("  跳过", use_container_width=True):
+            st.session_state["show_debate_prompt"] = False
+            st.session_state["pending_debate_codes"] = []
+            st.rerun()
 
 # 处理大盘概览
 if st.session_state.get("trigger_market_overview"):
