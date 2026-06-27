@@ -400,7 +400,7 @@ def _fmt_cap(value):
 def get_market_overview() -> str:
     """获取每日大盘综合报告
 
-    采集三路数据：
+    采集三路数据（并行加速）：
     1. 核心龙头股（MCP 实时行情）
     2. 概念/行业板块涨跌 TOP5（AKShare）
     3. 财联社/雪球/华尔街见闻热点新闻（NewsNow）
@@ -410,10 +410,11 @@ def get_market_overview() -> str:
         格式化的综合市场报告
     """
     import json
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     llm = _create_llm(temperature=0.3)
 
-    # ── 1. 龙头股数据 ──
+    # ── 并行获取三路数据 ──
     BENCHMARK_STOCKS = {
         "600519": "消费·茅台",
         "300750": "新能源·宁德时代",
@@ -423,26 +424,39 @@ def get_market_overview() -> str:
         "002415": "科技·海康威视",
         "601012": "新能源·隆基绿能",
     }
-    stock_data = []
-    for code, label in BENCHMARK_STOCKS.items():
+
+    def _fetch_one_stock(code_label):
+        code, label = code_label
         try:
             raw = _call_mcp_tool_sync("stk_market_value", {"security_code": code})
             d = _safe_json(raw)
             if d.get("security_name"):
-                stock_data.append({
+                return {
                     "name": d.get("security_name", code),
                     "label": label,
                     "price": d.get("close_price", "--"),
                     "cap": _fmt_cap(d.get("total_market_cap", 0)),
-                })
+                }
         except Exception as e:
             logger.warning(f"获取 {code} 数据失败: {e}")
+        return None
 
-    # ── 2. 板块数据 ──
-    sector_text = get_sector_overview_text()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        # 同时提交：7只个股 + 板块 + 新闻
+        stock_futures = {pool.submit(_fetch_one_stock, item): item for item in BENCHMARK_STOCKS.items()}
+        sector_future = pool.submit(get_sector_overview_text)
+        news_future = pool.submit(_fetch_market_news)
 
-    # ── 3. 新闻数据 ──
-    news_text = _fetch_market_news()
+        # 收集个股
+        stock_data = []
+        for f in as_completed(stock_futures):
+            result = f.result()
+            if result:
+                stock_data.append(result)
+
+        # 等待板块和新闻
+        sector_text = sector_future.result()
+        news_text = news_future.result()
 
     # ── LLM 汇总 ──
     stock_json = json.dumps(stock_data, ensure_ascii=False, indent=2)
@@ -478,27 +492,45 @@ def get_market_overview() -> str:
 
 
 def _fetch_market_news() -> str:
-    """获取财联社+华尔街见闻+雪球的最新热点（供大盘报告使用）"""
+    """获取财联社+华尔街见闻+雪球的最新热点（并行加速）"""
     try:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from .news_mcp import _fetch_source, _parse_items, NEWS_SOURCES
-        results = {}
-        for src_name in ["财联社", "华尔街见闻", "雪球"]:
+
+        NEWS_SOURCES_LIST = ["财联社", "华尔街见闻", "雪球"]
+
+        def _fetch_one(src_name):
             src_id = NEWS_SOURCES.get(src_name)
             if not src_id:
-                continue
-            data = _fetch_source(src_id)
-            if data:
-                items = _parse_items(data)
-                results[src_name] = items[:8]
+                return src_name, []
+            try:
+                data = _fetch_source(src_id)
+                if data:
+                    items = _parse_items(data)
+                    return src_name, items[:8]
+            except Exception as e:
+                logger.warning(f"新闻 {src_name} 获取失败: {e}")
+            return src_name, []
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {pool.submit(_fetch_one, s): s for s in NEWS_SOURCES_LIST}
+            results = {}
+            for f in as_completed(futures):
+                name, items = f.result()
+                if items:
+                    results[name] = items
+
         if not results:
             return "暂无新闻数据"
 
         lines = []
-        for name, items in results.items():
-            lines.append(f"\n### {name}")
-            for item in items:
-                title = item.get("title", "")[:50]
-                lines.append(f"- {title}")
+        for name in NEWS_SOURCES_LIST:
+            items = results.get(name, [])
+            if items:
+                lines.append(f"\n### {name}")
+                for item in items:
+                    title = item.get("title", "")[:50]
+                    lines.append(f"- {title}")
         return "\n".join(lines)
     except Exception as e:
         logger.warning(f"获取新闻数据失败: {e}")

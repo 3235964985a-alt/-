@@ -79,44 +79,45 @@ def get_industry_sectors(top_n: int = 10) -> List[Dict]:
 
 
 def get_sector_overview() -> str:
-    """获取板块全景概览（概念+行业）"""
+    """获取板块全景概览（概念+行业，并行加速）"""
     import pandas as pd
+    from concurrent.futures import ThreadPoolExecutor
 
-    try:
-        # 概念板块
-        concept_df = ak.stock_board_concept_name_em()
-        concept_total = len(concept_df) if concept_df is not None else 0
-        # 上涨/下跌概念数
-        concept_up = int((concept_df["涨跌幅"] > 0).sum()) if concept_df is not None else 0
-        concept_down = int((concept_df["涨跌幅"] < 0).sum()) if concept_df is not None else 0
-        # 领涨/领跌概念
-        concept_top = concept_df.nlargest(5, "涨跌幅")[["板块名称", "涨跌幅", "领涨股票"]].to_dict("records") if concept_df is not None else []
-        concept_bot = concept_df.nsmallest(5, "涨跌幅")[["板块名称", "涨跌幅", "领涨股票"]].to_dict("records") if concept_df is not None else []
+    def _fetch_concept():
+        try:
+            df = ak.stock_board_concept_name_em()
+            if df is None or len(df) == 0:
+                return 0, 0, 0, [], []
+            total = len(df)
+            up = int((df["涨跌幅"] > 0).sum())
+            down = int((df["涨跌幅"] < 0).sum())
+            top = df.nlargest(5, "涨跌幅")[["板块名称", "涨跌幅", "领涨股票"]].to_dict("records")
+            bot = df.nsmallest(5, "涨跌幅")[["板块名称", "涨跌幅", "领涨股票"]].to_dict("records")
+            return total, up, down, top, bot
+        except Exception as e:
+            logger.warning(f"概念板块数据获取失败: {e}")
+            return 0, 0, 0, [], []
 
-    except Exception as e:
-        logger.warning(f"概念板块数据获取失败: {e}")
-        concept_total = 0
-        concept_up = 0
-        concept_down = 0
-        concept_top = []
-        concept_bot = []
+    def _fetch_industry():
+        try:
+            df = ak.stock_board_industry_name_em()
+            if df is None or len(df) == 0:
+                return 0, 0, 0, [], []
+            total = len(df)
+            up = int((df["涨跌幅"] > 0).sum())
+            down = int((df["涨跌幅"] < 0).sum())
+            top = df.nlargest(5, "涨跌幅")[["板块名称", "涨跌幅", "领涨股票"]].to_dict("records")
+            bot = df.nsmallest(5, "涨跌幅")[["板块名称", "涨跌幅", "领涨股票"]].to_dict("records")
+            return total, up, down, top, bot
+        except Exception as e:
+            logger.warning(f"行业板块数据获取失败: {e}")
+            return 0, 0, 0, [], []
 
-    try:
-        # 行业板块
-        industry_df = ak.stock_board_industry_name_em()
-        industry_total = len(industry_df) if industry_df is not None else 0
-        industry_up = int((industry_df["涨跌幅"] > 0).sum()) if industry_df is not None else 0
-        industry_down = int((industry_df["涨跌幅"] < 0).sum()) if industry_df is not None else 0
-        # 领涨/领跌行业
-        industry_top = industry_df.nlargest(5, "涨跌幅")[["板块名称", "涨跌幅", "领涨股票"]].to_dict("records") if industry_df is not None else []
-        industry_bot = industry_df.nsmallest(5, "涨跌幅")[["板块名称", "涨跌幅", "领涨股票"]].to_dict("records") if industry_df is not None else []
-    except Exception as e:
-        logger.warning(f"行业板块数据获取失败: {e}")
-        industry_total = 0
-        industry_up = 0
-        industry_down = 0
-        industry_top = []
-        industry_bot = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        concept_future = pool.submit(_fetch_concept)
+        industry_future = pool.submit(_fetch_industry)
+        concept_total, concept_up, concept_down, concept_top, concept_bot = concept_future.result()
+        industry_total, industry_up, industry_down, industry_top, industry_bot = industry_future.result()
 
     result = {
         "concept": {
