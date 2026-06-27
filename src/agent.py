@@ -750,17 +750,42 @@ def _extract_stock_codes(text: str) -> list:
 
 def _is_buy_sell_intent(text: str) -> bool:
     """判断用户是否在请求买卖建议"""
-    keywords = ["能不能买", "该不该买", "该不该入", "能不能入", "是否买入",
-                "是否卖出", "买入建议", "卖出建议", "可以买", "可以入",
-                "值得买", "值得入", "要不要买", "要不要卖", "该卖",
-                "投资建议", "操作建议", "仓位建议", "买卖建议",
-                "要不要入", "建仓", "减仓", "加仓", "清仓", "能买吗", "能卖吗"]
+    keywords = [
+        "能不能买", "该不该买", "该不该入", "能不能入", "是否买入",
+        "是否卖出", "买入建议", "卖出建议", "可以买", "可以入",
+        "值得买", "值得入", "要不要买", "要不要卖", "该卖吗",
+        "投资建议", "操作建议", "仓位建议", "买卖建议",
+        "要不要入", "建仓", "减仓", "加仓", "清仓", "能买吗", "能卖吗",
+        "卖不卖", "该不该卖", "能不能卖", "可以卖吗", "值得卖",
+        "止盈", "止损", "离场", "出场", "该跑吗", "是不是该卖",
+        "要不要出", "该不该出", "买不买",
+    ]
     return any(kw in text for kw in keywords)
 
 
-def _maybe_debate(message: str) -> str:
-    """若用户消息含股票代码 + 买卖意图 → 返回辩论文本（含分隔符），否则返回 ''"""
+def _maybe_debate(message: str, thread_id: str = "") -> str:
+    """若用户消息含买卖意图 + 股票代码 → 返回辩论文本，否则 ''。
+
+    优先从当前消息提取代码，失败则从对话历史查找。
+    """
     codes = _extract_stock_codes(message)
+
+    # 当前消息无代码，尝试从对话历史中提取
+    if not codes and thread_id:
+        try:
+            from langgraph.checkpoint.memory import MemorySaver
+            graph = get_graph()
+            config = {"configurable": {"thread_id": thread_id}}
+            state = graph.get_state(config)
+            if state and state.values:
+                history = ""
+                for m in state.values.get("messages", [])[-10:]:
+                    if hasattr(m, "content"):
+                        history += str(m.content) + " "
+                codes = _extract_stock_codes(history)
+        except Exception:
+            codes = []
+
     if not codes or not _is_buy_sell_intent(message):
         return ""
     try:
@@ -784,8 +809,8 @@ def chat(message: str, thread_id: str = "default") -> Dict[str, Any]:
     final_msg = result["messages"][-1] if result.get("messages") else None
     response_text = final_msg.content if final_msg else "抱歉，无法处理您的请求。"
 
-    # 买卖建议 → 自动触发辩论
-    debate_text = _maybe_debate(message)
+    # 买卖建议 → 自动触发辩论（传入 thread_id 以从历史提取代码）
+    debate_text = _maybe_debate(message, thread_id)
     if debate_text:
         response_text += debate_text
 
@@ -837,7 +862,7 @@ def chat_stream(message: str, thread_id: str = "default"):
 
     yield {"type": "done", "agent": last_agent, "response": final_text}
 
-    # 买卖建议 → 辩论
-    debate_text = _maybe_debate(message)
+    # 买卖建议 → 辩论（传入 thread_id 以从历史提取代码）
+    debate_text = _maybe_debate(message, thread_id)
     if debate_text:
         yield {"type": "debate_signal", "text": debate_text}
