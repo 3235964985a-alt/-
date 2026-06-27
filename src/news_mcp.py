@@ -202,5 +202,116 @@ class _ListSourcesTool(BaseTool):
         return _call_newsnow_sync("list_sources", {})
 
 
-NEWS_TOOLS = [_GetSingleNewsTool(), _GetMultiNewsTool(), _GetAllNewsTool(), _ListSourcesTool()]
+# ---------- 新闻情绪评分 ----------
+
+def _get_sentiment(llm, titles: List[str], source_name: str) -> Dict:
+    """调用 LLM 对一批新闻标题做情绪评分"""
+    if not titles:
+        return {"score": 0, "label": "中性", "summary": "无新闻数据"}
+
+    titles_text = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles[:15]))
+    prompt = f"""你是金融市场情绪分析专家。请对以下【{source_name}】的新闻标题做情绪评分。
+
+新闻标题：
+{titles_text}
+
+请以 JSON 格式返回：
+{{
+    "score": -100到100的整数（-100极度悲观，0中性，100极度乐观），
+    "label": "乐观/偏乐观/中性/偏悲观/悲观",
+    "summary": "一句话概括该源的整体情绪倾向和关键信号"
+}}
+
+仅输出 JSON，不要多余文字。"""
+
+    try:
+        resp = llm.invoke(prompt)
+        text = resp.content if hasattr(resp, "content") else str(resp)
+        # 提取 JSON
+        text = text.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        return json.loads(text)
+    except Exception as e:
+        logger.warning(f"情绪评分失败 ({source_name}): {e}")
+        return {"score": 0, "label": "中性", "summary": f"评分异常: {e}"}
+
+
+def get_news_sentiment(force_refresh: bool = False) -> str:
+    """获取新闻情绪综合评分
+
+    从财联社、华尔街见闻、雪球获取最新新闻标题，
+    由 LLM 分别打分（-100到100），汇总情绪全景。
+
+    Returns:
+        格式化的情绪分析报告
+    """
+    try:
+        from .config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+        from langchain_openai import ChatOpenAI
+
+        llm = ChatOpenAI(
+            model=OPENAI_MODEL,
+            api_key=OPENAI_API_KEY,
+            base_url=OPENAI_BASE_URL,
+            temperature=0.1,
+        )
+    except Exception as e:
+        logger.warning(f"创建 LLM 失败: {e}")
+        return json.dumps({"error": "LLM 不可用"}, ensure_ascii=False)
+
+    FINANCE_SOURCES = ["财联社", "华尔街见闻", "雪球"]
+    results = {}
+
+    for src_name in FINANCE_SOURCES:
+        src_id = NEWS_SOURCES.get(src_name)
+        if not src_id:
+            continue
+        try:
+            data = _fetch_source(src_id)
+            if data:
+                items = _parse_items(data)
+                titles = [item.get("title", "") for item in items[:12]]
+            else:
+                titles = []
+        except Exception as e:
+            logger.warning(f"获取 {src_name} 失败: {e}")
+            titles = []
+
+        sent = _get_sentiment(llm, titles, src_name)
+        results[src_name] = {
+            "score": sent.get("score", 0),
+            "label": sent.get("label", "中性"),
+            "titles": titles[:3],  # 前端展示前3条
+        }
+
+    # 汇总
+    scores = [r["score"] for r in results.values()]
+    avg_score = sum(scores) / len(scores) if scores else 0
+    if avg_score > 30:
+        overall = "市场情绪偏乐观"
+    elif avg_score < -30:
+        overall = "市场情绪偏悲观"
+    else:
+        overall = "市场情绪中性"
+
+    report = {
+        "overall_score": round(avg_score, 1),
+        "overall_label": overall,
+        "sources": results,
+    }
+    return json.dumps(report, ensure_ascii=False, indent=2)
+
+
+class _GetNewsSentimentTool(BaseTool):
+    name: str = "get_news_sentiment"
+    description: str = "获取新闻情绪综合评分。从财联社、华尔街见闻、雪球获取最新新闻，由LLM评分（-100到100），返回市场情绪全景。无参数。"
+
+    def _run(self, _: str = "") -> str:
+        return get_news_sentiment()
+
+
+NEWS_TOOLS = [_GetSingleNewsTool(), _GetMultiNewsTool(), _GetAllNewsTool(), _ListSourcesTool(), _GetNewsSentimentTool()]
 NEWS_TOOL_MAP = {t.name: t for t in NEWS_TOOLS}
