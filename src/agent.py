@@ -83,13 +83,12 @@ def create_supervisor_node():
     llm = _create_llm(temperature=0.3)
 
     def supervisor_node(state: AgentState) -> Dict[str, Any]:
-        messages = state.get("messages", [])
+        messages = list(state.get("messages", []))
         round_count = state.get("round_count", 0)
 
-        # 构造路由决策消息
+        # 构造路由决策消息——保留最近20条让 Supervisor 有足够上下文
         system_msg = SystemMessage(content=SUPERVISOR_PROMPT)
-        # 只取最近的用户消息 + 历史摘要
-        recent = list(messages[-6:])  # 最近6条
+        recent = messages[-20:] if len(messages) > 20 else messages
         decision_msgs = [system_msg] + recent
 
         response = llm.invoke(decision_msgs)
@@ -169,9 +168,9 @@ def _create_worker_node(
 
         system_msg = SystemMessage(content=system_content)
 
-        # 过滤掉工具消息和旧的系统消息，保留最近的对话
+        # 保留最近30条（含工具消息），确保多轮对话上下文完整
         filtered = []
-        for msg in messages[-10:]:
+        for msg in messages[-30:]:
             if isinstance(msg, SystemMessage):
                 continue
             filtered.append(msg)
@@ -566,27 +565,22 @@ def sector_overview_tool(dummy: str = "") -> str:
 
 
 def chat(message: str, thread_id: str = "default") -> Dict[str, Any]:
-    """同步对话接口
+    """同步对话接口（带上下文记忆）
 
     Args:
         message: 用户消息
-        thread_id: 会话线程ID（用于多轮对话记忆）
+        thread_id: 会话线程ID（跨轮持久化记忆）
 
     Returns:
-        {"response": str, "agent": str, "tool_calls": list}
+        {"response": str, "agent": str}
     """
     graph = get_graph()
-
     config = {"configurable": {"thread_id": thread_id}}
-    state = {
-        "messages": [HumanMessage(content=message)],
-        "next_agent": "supervisor",
-        "round_count": 0,
-    }
+
+    # 只传当前消息，LangGraph 自动从 checkpoint 加载历史+合并
+    state = {"messages": [HumanMessage(content=message)]}
 
     result = graph.invoke(state, config)
-
-    # 提取最终回复
     final_msg = result["messages"][-1] if result.get("messages") else None
     response_text = final_msg.content if final_msg else "抱歉，无法处理您的请求。"
 
@@ -604,24 +598,18 @@ async def chat_async(message: str, thread_id: str = "default") -> Dict[str, Any]
 
 
 def chat_stream(message: str, thread_id: str = "default"):
-    """流式对话接口
-
-    使用 LangGraph stream 模式，每个节点完成后产出增量状态，
-    最终 Agent 的输出会逐段流式返回。
+    """流式对话接口（带上下文记忆）
 
     Yields:
         {"type": "agent", "name": str}  — Agent 切换
-        {"type": "content", "text": str} — 最终回复内容（逐字模拟流式）
-        {"type": "done", "agent": str, "response": str} — 完成信号
+        {"type": "content", "text": str} — 内容块
+        {"type": "done", "agent": str, "response": str} — 完成
     """
     graph = get_graph()
-
     config = {"configurable": {"thread_id": thread_id}}
-    state = {
-        "messages": [HumanMessage(content=message)],
-        "next_agent": "supervisor",
-        "round_count": 0,
-    }
+
+    # 只传当前消息，LangGraph 自动从 checkpoint 加载历史+合并
+    state = {"messages": [HumanMessage(content=message)]}
 
     last_agent = "supervisor"
     last_event = None
