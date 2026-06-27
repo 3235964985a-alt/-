@@ -88,84 +88,203 @@ st.markdown("""
 # ---------- 侧边栏 ----------
 with st.sidebar:
     st.markdown("##  金融智能助手")
-    st.markdown("---")
 
-    st.markdown("###  系统概况")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("  Agent", "5")
-    with col2:
-        st.metric("  Tools", "23")
-    with col3:
-        st.metric("  数据源", "4")
+    # 系统说明按钮
+    if st.button("  系统说明", use_container_width=True, type="secondary", key="btn_sysinfo",
+                 help="查看多智能体架构、数据源、技术栈和功能列表"):
+        st.session_state.show_system_info = True
+        st.rerun()
 
     st.markdown("---")
 
-    st.markdown("###  多智能体架构")
-    st.markdown("""
-| Agent | 职能 | 工具数 |
-|---|---|---|
-| ** 股票数据** | 个股市值、收盘价、调研 | 4 |
-| ** 财务分析** | DCF估值、ROE/ROIC/毛利率/净利率/股息率筛选 | 10 |
-| ** ESG评级** | 妙盈科技、华证指数、商道融绿三大机构评级 | 3 |
-| ** 财经新闻** | 财联社/雪球/华尔街见闻/知乎/微博等14+源，含情绪评分 | 5 |
-| ** 通用助手** | 金融知识问答 + RAG知识库 | 1 |
-    """)
+    # 持仓截图上传
+    st.markdown("###  持仓截图识别")
+    with st.expander("  上传截图，AI 识别并分析", expanded=False):
+        uploaded_file = st.file_uploader("上传持仓截图", type=["png", "jpg", "jpeg"], key="portfolio_upload",
+                                         label_visibility="collapsed")
+        if uploaded_file and st.button("  识别并分析持仓", type="primary", use_container_width=True, key="btn_ocr"):
+            with st.spinner("  OCR 识别中..."):
+                try:
+                    from src.ocr_parser import parse_portfolio_from_image
+                    import tempfile, os
+
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                        tmp.write(uploaded_file.read())
+                        tmp_path = tmp.name
+
+                    result = parse_portfolio_from_image(tmp_path)
+                    os.unlink(tmp_path)
+
+                    holdings = result.get("holdings", [])
+                    summary = result.get("summary", {})
+                    notes = result.get("notes", [])
+
+                    if holdings:
+                        st.success(f"AI 识别完成：{len(holdings)} 只持仓股")
+                        if summary:
+                            parts = []
+                            if summary.get("total_asset"):
+                                parts.append(f"总资产: {summary['total_asset']}")
+                            if summary.get("total_profit"):
+                                parts.append(f"总盈亏: {summary['total_profit']}")
+                            if summary.get("stock_count"):
+                                parts.append(f"持股: {summary['stock_count']}只")
+                            if parts:
+                                st.caption(" | ".join(parts))
+
+                        for h in holdings:
+                            code = h.get("code", "")
+                            name = h.get("name", "")
+                            shares = h.get("shares", "")
+                            cost = h.get("cost", "")
+                            price = h.get("price", "")
+                            profit = h.get("profit", "")
+                            profit_pct = h.get("profit_pct", "")
+                            info_parts = [f"**{name}**" if name else f"`{code}`"]
+                            if code:
+                                info_parts.append(f"`{code}`")
+                            if shares:
+                                info_parts.append(f"{shares}股")
+                            if cost:
+                                info_parts.append(f"成本{cost}")
+                            if price:
+                                info_parts.append(f"现价{price}")
+                            if profit:
+                                info_parts.append(f"盈亏{profit}")
+                            if profit_pct:
+                                info_parts.append(f"({profit_pct})")
+                            st.write(f"• {' · '.join(info_parts)}")
+
+                        if notes:
+                            with st.expander("  备注"):
+                                for n in notes:
+                                    st.caption(f"• {n}")
+
+                        codes = [h["code"] for h in holdings if h.get("code")]
+                        st.session_state.ocr_holdings = holdings
+                        st.session_state.ocr_summary = summary
+                        st.session_state.ocr_codes = codes if codes else []
+                        st.session_state.trigger_ocr_analysis = True
+                        st.rerun()
+                    else:
+                        st.warning("AI 未能识别到持仓股票，请确认截图为券商持仓页面")
+                except Exception as e:
+                    st.error(f"识别失败：{str(e)}")
+        if "ocr_codes" in st.session_state and st.session_state.ocr_codes:
+            st.info(f"已识别 {len(st.session_state.ocr_codes)} 只：{', '.join(st.session_state.ocr_codes)}")
 
     st.markdown("---")
 
-    st.markdown("###  数据源")
-    st.markdown("""
-| 来源 | 协议 | 内容 |
-|---|---|---|
-| **证券之星** | MCP (SSE) | 股票市值、DCF估值、ESG评级、筛选指标 |
-| **东方财富** | AKShare HTTP | 概念板块(494) + 行业板块(496) 实时行情 |
-| **NewsNow** | HTTP API | 14+新闻源实时热点 + LLM情绪评分 |
-| **ChromaDB** | 本地 | RAG金融知识库 |
-    """)
+    # 大盘概览
+    if st.button("  大盘概览", type="primary", use_container_width=True, key="market_overview_btn",
+                 help="获取今日A股核心龙头行情概览"):
+        st.session_state.trigger_market_overview = True
+        st.rerun()
 
-    st.markdown("---")
-
-    st.markdown("###  特色功能")
-    st.markdown("""
--   大盘综合报告（龙头股 + 板块 + 新闻三路聚合）
--   板块轮动分析（概念/行业涨跌TOP5）
--   新闻情绪评分（三源LLM打分，-100~100）
--   持仓截图OCR识别（EasyOCR + LLM解析）
--   自选股多Agent协作（news→stock→analysis→申论）
--   流式逐字输出
-    """)
-
-    st.markdown("---")
-
-    st.markdown("### ✨ 技术栈")
-    st.markdown("""
-    - **LLM**: GPT-4o
-    - **框架**: LangChain + LangGraph
-    - **协议**: MCP (Model Context Protocol)
-    - **知识库**: RAG + ChromaDB
-    - **识别**: EasyOCR 持股截图解析
-    - **架构**: Supervisor-Worker 多智能体
-    """)
-
-    st.markdown("---")
-
-    # 清空对话按钮
+    # 清空对话
     if st.button(" 清空对话历史", type="secondary", use_container_width=True):
         st.session_state.messages = []
         st.session_state.thread_id = str(uuid.uuid4())
         st.rerun()
 
-    # 大盘概览快捷按钮
-    st.markdown("---")
-    if st.button("  大盘概览", type="primary", use_container_width=True, key="market_overview_btn",
-                 help="一键获取今日A股核心龙头行情概览"):
-        st.session_state.trigger_market_overview = True
-        st.rerun()
-
     st.markdown("---")
     st.caption("© 2025 课程设计项目 | 金融智能对话系统")
+
+
+# ---------- 系统说明悬浮窗 ----------
+if st.session_state.get("show_system_info"):
+    st.markdown("""
+    <style>
+        #sysinfo-overlay {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.4); z-index: 99999;
+            display: flex; align-items: center; justify-content: center;
+        }
+        #sysinfo-dialog {
+            background: #fff; border-radius: 16px; padding: 0;
+            max-width: 680px; width: 90vw; max-height: 85vh;
+            overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+            font-size: 0.88rem; color: #1a1a2e;
+        }
+        #sysinfo-dialog .dialog-header {
+            display: flex; align-items: center;
+            padding: 16px 20px; background: linear-gradient(135deg, #3730a3, #5b21b6);
+            color: #fff; border-radius: 16px 16px 0 0;
+        }
+        #sysinfo-dialog .dialog-title { font-size: 1.1rem; font-weight: 700; }
+        #sysinfo-dialog .dialog-body {
+            padding: 8px 20px 0; max-height: 58vh; overflow-y: auto;
+        }
+        #sysinfo-dialog h4 { margin: 14px 0 6px; font-size: 0.95rem; color: #3730a3; }
+        #sysinfo-dialog table { width: 100%; font-size: 0.78rem; border-collapse: collapse; margin: 6px 0; }
+        #sysinfo-dialog td, #sysinfo-dialog th {
+            padding: 5px 8px; border-bottom: 1px solid #eee; text-align: left;
+        }
+        #sysinfo-dialog th { background: #f3f4f6; font-weight: 600; color: #555; }
+        #sysinfo-dialog ul { margin: 4px 0; padding-left: 18px; font-size: 0.82rem; }
+        #sysinfo-dialog li { margin: 3px 0; }
+        .stat-row { display: flex; gap: 16px; margin: 8px 0; }
+        .stat-item { background: #f3f4f6; border-radius: 8px; padding: 8px 14px; text-align: center; flex: 1; }
+        .stat-item big { font-size: 1.3rem; font-weight: 700; color: #3730a3; }
+    </style>
+    <div id="sysinfo-overlay">
+        <div id="sysinfo-dialog">
+            <div class="dialog-header">
+                <span class="dialog-title">  系统说明 — 金融智能助手</span>
+            </div>
+            <div class="dialog-body">
+                <div class="stat-row">
+                    <div class="stat-item"><big>5</big><br>智能体</div>
+                    <div class="stat-item"><big>23</big><br>MCP工具</div>
+                    <div class="stat-item"><big>4</big><br>数据源</div>
+                </div>
+
+                <h4>  多智能体架构</h4>
+                <table>
+                <tr><th>Agent</th><th>职能</th><th>工具</th></tr>
+                <tr><td> 股票数据</td><td>个股市值、收盘价、调研</td><td>4</td></tr>
+                <tr><td> 财务分析</td><td>DCF估值、ROE/ROIC/毛利率/净利率/股息率筛选</td><td>10</td></tr>
+                <tr><td> ESG评级</td><td>妙盈科技/华证指数/商道融绿 三大机构评级</td><td>3</td></tr>
+                <tr><td> 财经新闻</td><td>财联社/雪球/华尔街见闻/知乎等14+源，含情绪评分</td><td>5</td></tr>
+                <tr><td> 通用助手</td><td>金融知识问答 + RAG知识库</td><td>1</td></tr>
+                </table>
+
+                <h4>  数据源</h4>
+                <table>
+                <tr><th>来源</th><th>协议</th><th>内容</th></tr>
+                <tr><td>证券之星</td><td>MCP (SSE)</td><td>股票市值、DCF估值、ESG评级、筛选指标</td></tr>
+                <tr><td>东方财富</td><td>AKShare HTTP</td><td>概念板块(494) + 行业板块(496) 实时行情</td></tr>
+                <tr><td>NewsNow</td><td>HTTP API</td><td>14+新闻源实时热点 + LLM情绪评分</td></tr>
+                <tr><td>ChromaDB</td><td>本地</td><td>RAG金融知识库</td></tr>
+                </table>
+
+                <h4>✨ 技术栈</h4>
+                <ul>
+                <li>LLM: GPT-4o · 框架: LangChain + LangGraph</li>
+                <li>协议: MCP (Model Context Protocol) · 架构: Supervisor-Worker</li>
+                <li>知识库: RAG + ChromaDB · 截图识别: EasyOCR</li>
+                </ul>
+
+                <h4>  特色功能</h4>
+                <ul>
+                <li>大盘综合报告（龙头股 + 板块 + 新闻三路聚合）</li>
+                <li>板块轮动分析（概念/行业涨跌TOP5）</li>
+                <li>新闻情绪评分（三源LLM打分，-100~100）</li>
+                <li>持仓截图OCR识别（EasyOCR + LLM解析）</li>
+                <li>自选股多Agent协作分析</li>
+                <li>流式逐字输出</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 关闭按钮（Streamlit原生）
+    c1, c2, c3 = st.columns([2, 1, 2])
+    with c2:
+        if st.button("✕ 关闭", key="_dismiss_sysinfo", use_container_width=True, type="primary"):
+            st.session_state.show_system_info = False
+            st.rerun()
 
 
 # ---------- 主体 ----------
@@ -181,6 +300,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
+if "show_system_info" not in st.session_state:
+    st.session_state.show_system_info = False
 
 # 欢迎消息
 if not st.session_state.messages:
@@ -252,42 +373,6 @@ user_input = st.chat_input("请输入您的问题...", key="user_input")
 if "quick_msg" in st.session_state and st.session_state.quick_msg:
     user_input = st.session_state.quick_msg
     st.session_state.quick_msg = ""
-
-# 处理自选股分析
-if st.session_state.get("trigger_analysis"):
-    st.session_state.trigger_analysis = False
-    all_stocks = []
-    for entries in st.session_state.watchlist.values():
-        for e in entries:
-            all_stocks.append(e[0] if isinstance(e, list) else e)
-
-    if all_stocks:
-        with st.chat_message("user"):
-            st.markdown(f"  分析自选股（{len(all_stocks)}只）：{', '.join(all_stocks)}")
-        st.session_state.messages.append({
-            "role": "user",
-            "content": f"分析自选股：{', '.join(all_stocks)}",
-        })
-
-        with st.chat_message("assistant"):
-            with st.spinner(f"  正在分析 {len(all_stocks)} 只自选股（市值+估值+ESG）..."):
-                try:
-                    report = analyze_watchlist(all_stocks)
-                    st.markdown('<span class="agent-badge badge-analysis">  自选股报告</span>', unsafe_allow_html=True)
-                    st.markdown(report)
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": report,
-                        "agent": "analysis_agent",
-                    })
-                except Exception as e:
-                    error_msg = f"抱歉，分析出错：{str(e)}"
-                    st.error(error_msg)
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": error_msg,
-                        "agent": "error",
-                    })
 
 # 处理 OCR 持仓分析
 if st.session_state.get("trigger_ocr_analysis"):
