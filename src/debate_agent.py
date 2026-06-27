@@ -285,6 +285,85 @@ def _build_analysts() -> List[AnalystAgent]:
     ]
 
 
+# ---------- 股票类型识别 ----------
+
+def _classify_stock_type(data: Dict[str, Any]) -> str:
+    """根据财务数据判断股票类型：growth / value / balanced"""
+    roe_score = 0
+    div_score = 0
+
+    # ROE 高 → 成长型
+    roe_raw = data.get("roe", {})
+    if isinstance(roe_raw, dict):
+        roe_val = roe_raw.get("roe_1y", roe_raw.get("roe", 0)) or 0
+        try:
+            if float(roe_val) > 20:
+                roe_score = 2
+            elif float(roe_val) > 10:
+                roe_score = 1
+        except (ValueError, TypeError):
+            pass
+
+    # 股息率高 → 价值型
+    div_raw = data.get("div", {})
+    if isinstance(div_raw, dict):
+        div_val = div_raw.get("div_rate", div_raw.get("dividend_yield", 0)) or 0
+        try:
+            if float(div_val) > 3:
+                div_score = 2
+            elif float(div_val) > 1:
+                div_score = 1
+        except (ValueError, TypeError):
+            pass
+
+    if roe_score >= 2 and div_score <= 1:
+        return "growth"
+    elif div_score >= 2 and roe_score <= 1:
+        return "value"
+    return "balanced"
+
+
+def _compute_role_weights(data: Dict[str, Any]) -> Dict[str, float]:
+    """根据股票类型动态分配各角色权重
+
+    成长股：放大成长派/市场派，削弱价值派/质量派
+    价值股：放大价值派/质量派，削弱成长派
+    平衡型：等权
+    """
+    stype = _classify_stock_type(data)
+
+    if stype == "growth":
+        return {
+            "价值派": 0.5,   # DCF对高增长股天然不利
+            "成长派": 2.0,   # ROE/ROIC 是关键
+            "质量派": 0.5,   # 成长股通常不分红
+            "市场派": 1.5,   # 市场共识对成长股重要
+            "责任派": 1.0,
+            "情绪派": 1.0,
+            "风控官": 1.0,
+        }
+    elif stype == "value":
+        return {
+            "价值派": 2.0,
+            "成长派": 0.5,
+            "质量派": 1.5,
+            "市场派": 1.0,
+            "责任派": 1.0,
+            "情绪派": 1.0,
+            "风控官": 1.0,
+        }
+    else:  # balanced
+        return {
+            "价值派": 1.0,
+            "成长派": 1.0,
+            "质量派": 1.0,
+            "市场派": 1.0,
+            "责任派": 1.0,
+            "情绪派": 1.0,
+            "风控官": 1.0,
+        }
+
+
 # ---------- 辩论主流程 ----------
 
 def debate_stock(stock_code: str) -> Dict[str, Any]:
@@ -372,20 +451,37 @@ def debate_stock(stock_code: str) -> Dict[str, Any]:
                 "score": score, "vote": vote, "cooperate": cooperate, "reason": reason
             }
 
+    # ═══════════ 动态角色权重 ═══════════
+    # 根据股票特征调整各分析师权重，避免对成长/价值股的系统性偏见
+    role_weights = _compute_role_weights(stock_data)
+
     # ═══════════ 最终裁决 ═══════════
-    # 合作者 1.5x 权重
+    # 合作者加成 × 角色权重
     weighted_votes = {"buy": 0, "hold": 0, "sell": 0}
     total_weight = 0
     total_score = 0
+    weight_breakdown = {}  # 记录每个agent的最终权重供展示
 
     for name, r2 in round2_results.items():
-        w = 1.5 if r2["cooperate"] else 1.0
-        weighted_votes[r2["vote"]] += w
-        total_weight += w
-        total_score += r2["score"] * w
+        # 匹配角色权重
+        rw = 1.0
+        for role_prefix, w in role_weights.items():
+            if name.startswith(role_prefix):
+                rw = w
+                break
+        cooperate_bonus = 1.5 if r2["cooperate"] else 1.0
+        final_w = round(rw * cooperate_bonus, 2)
+        weight_breakdown[name] = {"role_weight": rw, "cooperate_bonus": cooperate_bonus, "final_weight": final_w}
+
+        weighted_votes[r2["vote"]] += final_w
+        total_weight += final_w
+        total_score += r2["score"] * final_w
 
     final_score = round(total_score / total_weight, 1) if total_weight > 0 else 0
     buy_signal = weighted_votes["buy"] > (total_weight / 2)  # > 50%
+
+    # 股票类型标签
+    stock_type = _classify_stock_type(stock_data)
 
     # 构建结果
     r1_simple = {name: {"score": s, "vote": v, "reason": r}
@@ -394,10 +490,13 @@ def debate_stock(stock_code: str) -> Dict[str, Any]:
     result = {
         "stock_code": stock_code,
         "stock_name": stock_name,
+        "stock_type": stock_type,
         "buy_signal": buy_signal,
         "final_score": final_score,
         "round1": r1_simple,
         "round2": round2_results,
+        "role_weights": {k: round(v, 1) for k, v in role_weights.items()},
+        "weight_breakdown": weight_breakdown,
         "vote_summary": {
             "buy_weight": round(weighted_votes["buy"], 1),
             "hold_weight": round(weighted_votes["hold"], 1),
@@ -411,9 +510,9 @@ def debate_stock(stock_code: str) -> Dict[str, Any]:
     }
 
     signal = "买入提醒" if buy_signal else "无买入信号"
-    logger.info(f"  辩论完成: {stock_name}({stock_code}) → {signal}, 最终得分{final_score}, "
+    logger.info(f"  辩论完成: {stock_name}({stock_code}) [{stock_type}] → {signal}, 最终得分{final_score}, "
                 f"buy{weighted_votes['buy']}, hold{weighted_votes['hold']}, sell{weighted_votes['sell']}, "
-                f"合作者: {result['vote_summary']['cooperators']}")
+                f"角色权重: {role_weights}")
 
     return result
 

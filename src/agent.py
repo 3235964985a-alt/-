@@ -334,23 +334,29 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
         vs = d["vote_summary"]
         signal = "**  买入提醒**" if d["buy_signal"] else ""
 
-        # 该股投票明细
-        vote_detail = []
+        # 该股投票明细（含角色权重）
+        type_label = {"growth": "成长型", "value": "价值型", "balanced": "平衡型"}.get(d.get("stock_type", "balanced"), "平衡型")
+        rw = d.get("role_weights", {})
+        weight_col = []
         for agent_name, r2 in d["round2"].items():
             c_flag = "  合作" if r2["cooperate"] else "  坚持"
-            vote_detail.append(
-                f"| {agent_name} | {c_flag} | {r2['vote']} | {r2['score']} | {r2['reason']} |"
+            wb = d.get("weight_breakdown", {}).get(agent_name, {})
+            fw = wb.get("final_weight", rw.get(agent_name[:3], 1.0))
+            weight_col.append(
+                f"| {agent_name} | {c_flag} | {r2['vote']} | {r2['score']} | ×{fw} | {r2['reason']} |"
             )
 
         single_report_prompt = f"""你是一位资深投资分析师。以下是 7 位分析师对 {name}({code}) 的两轮囚徒困境辩论结果：
+
+【股票类型】{type_label}（动态角色权重已调整，避免对该类型股票的系统性偏见）
 
 【投票结果】
 最终得分: {d['final_score']} | 加权: buy {vs['buy_weight']}  hold {vs['hold_weight']}  sell {vs['sell_weight']}
 合作者: {', '.join(vs['cooperators'])} | 坚持者: {', '.join(vs['defectors'])}
 
-| 分析师 | 立场 | 投票 | 评分 | 理由 |
-|---|---|---|---|---|
-{chr(10).join(vote_detail)}
+| 分析师 | 立场 | 投票 | 评分 | 权重 | 理由 |
+|---|---|---|---|---|---|
+{chr(10).join(weight_col)}
 
 【要求】仅针对 {name}({code}) 一只股票，生成分析报告：
 
