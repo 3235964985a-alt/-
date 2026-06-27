@@ -54,6 +54,7 @@ st.markdown("""
     .badge-stock { background: #d1fae5; color: #065f46; }
     .badge-analysis { background: #fef3c7; color: #92400e; }
     .badge-esg { background: #ede9fe; color: #5b21b6; }
+    .badge-news { background: #fce7f3; color: #9d174d; }
     .badge-general { background: #e5e7eb; color: #374151; }
     .badge-tool { background: #fce7f3; color: #9d174d; }
     .chat-message {
@@ -93,9 +94,9 @@ with st.sidebar:
 
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("  Agent", "4")
+        st.metric("  Agent", "5")
     with col2:
-        st.metric("  Tools", "16")
+        st.metric("  Tools", "20")
 
     st.markdown("---")
 
@@ -104,6 +105,7 @@ with st.sidebar:
     - ** 股票数据专家** — 市值、调研信息
     - ** 财务分析师** — DCF估值、指标筛选
     - ** ESG评级专家** — 三大机构ESG评级
+    - ** 财经新闻专家** — 热点新闻、市场资讯
     - ** 通用助手** — 金融知识问答 + RAG
     """)
 
@@ -234,6 +236,7 @@ for msg in st.session_state.messages:
                 "stock_agent": "badge-stock",
                 "analysis_agent": "badge-analysis",
                 "esg_agent": "badge-esg",
+                "news_agent": "badge-news",
                 "general_agent": "badge-general",
             }.get(agent_name, "badge-general")
 
@@ -242,6 +245,7 @@ for msg in st.session_state.messages:
                 "stock_agent": "股票数据",
                 "analysis_agent": "财务分析",
                 "esg_agent": "ESG评级",
+                "news_agent": "财经新闻",
                 "general_agent": "通用助手",
             }.get(agent_name, agent_name)
 
@@ -314,6 +318,7 @@ if user_input:
                     "stock_agent": "badge-stock",
                     "analysis_agent": "badge-analysis",
                     "esg_agent": "badge-esg",
+                    "news_agent": "badge-news",
                     "general_agent": "badge-general",
                 }.get(agent, "badge-general")
 
@@ -322,6 +327,7 @@ if user_input:
                     "stock_agent": "股票数据",
                     "analysis_agent": "财务分析",
                     "esg_agent": "ESG评级",
+                    "news_agent": "财经新闻",
                     "general_agent": "通用助手",
                 }.get(agent, agent)
 

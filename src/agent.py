@@ -22,14 +22,19 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from .config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 from .mcp_tools import STOCK_TOOLS, ANALYSIS_TOOLS, ESG_TOOLS, TOOL_MAP, _call_mcp_tool_sync
+from .news_mcp import NEWS_TOOLS, NEWS_TOOL_MAP
 from .prompts import (
     SUPERVISOR_PROMPT,
     STOCK_AGENT_PROMPT,
     ANALYSIS_AGENT_PROMPT,
     ESG_AGENT_PROMPT,
     GENERAL_AGENT_PROMPT,
+    NEWS_AGENT_PROMPT,
 )
 from .rag import retrieve_knowledge_as_context
+
+# 合并工具映射
+_ALL_TOOL_MAP = {**TOOL_MAP, **NEWS_TOOL_MAP}
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,7 @@ AGENT_NODES = {
     "stock_agent": "stock_agent",
     "analysis_agent": "analysis_agent",
     "esg_agent": "esg_agent",
+    "news_agent": "news_agent",
     "general_agent": "general_agent",
 }
 
@@ -86,7 +92,7 @@ def create_supervisor_node():
         decision = (response.content or "").strip().lower()
 
         # 解析并规范化决策
-        for agent_name in ["stock_agent", "analysis_agent", "esg_agent", "general_agent"]:
+        for agent_name in ["stock_agent", "analysis_agent", "esg_agent", "news_agent", "general_agent"]:
             if agent_name in decision:
                 logger.info(f"Supervisor路由 → {agent_name}")
                 return {
@@ -167,7 +173,7 @@ def _create_worker_node(
                 tool_args = tc.get("args", {})
                 tool_id = tc.get("id", "")
 
-                tool = TOOL_MAP.get(tool_name)
+                tool = _ALL_TOOL_MAP.get(tool_name)
                 if tool:
                     try:
                         result = tool.invoke(tool_args)
@@ -218,12 +224,16 @@ def build_graph() -> StateGraph:
         AGENT_NODES["general_agent"],
         _create_worker_node("general_agent", GENERAL_AGENT_PROMPT, [], use_rag=True),
     )
+    workflow.add_node(
+        AGENT_NODES["news_agent"],
+        _create_worker_node("news_agent", NEWS_AGENT_PROMPT, NEWS_TOOLS, use_rag=False),
+    )
 
     # 设置入口
     workflow.set_entry_point(AGENT_NODES["supervisor"])
 
     # Supervisor → 各Worker的条件路由
-    def route_to_worker(state: AgentState) -> Literal["stock_agent", "analysis_agent", "esg_agent", "general_agent"]:
+    def route_to_worker(state: AgentState) -> Literal["stock_agent", "analysis_agent", "esg_agent", "news_agent", "general_agent"]:
         return state["next_agent"]
 
     workflow.add_conditional_edges(
@@ -233,6 +243,7 @@ def build_graph() -> StateGraph:
             "stock_agent": AGENT_NODES["stock_agent"],
             "analysis_agent": AGENT_NODES["analysis_agent"],
             "esg_agent": AGENT_NODES["esg_agent"],
+            "news_agent": AGENT_NODES["news_agent"],
             "general_agent": AGENT_NODES["general_agent"],
         },
     )
@@ -242,6 +253,7 @@ def build_graph() -> StateGraph:
     workflow.add_edge(AGENT_NODES["analysis_agent"], END)
     workflow.add_edge(AGENT_NODES["esg_agent"], END)
     workflow.add_edge(AGENT_NODES["general_agent"], END)
+    workflow.add_edge(AGENT_NODES["news_agent"], END)
 
     # 编译图（带内存检查点）
     memory = MemorySaver()
