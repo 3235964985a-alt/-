@@ -26,6 +26,7 @@ from .config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 from .mcp_tools import STOCK_TOOLS, ANALYSIS_TOOLS, ESG_TOOLS, TOOL_MAP, _call_mcp_tool_sync
 from .news_mcp import NEWS_TOOLS, NEWS_TOOL_MAP
 from .sector_data import get_sector_overview_text
+from .data_layer import safe_json, fmt_cap
 from .prompts import (
     SUPERVISOR_PROMPT,
     STOCK_AGENT_PROMPT,
@@ -304,8 +305,7 @@ def get_graph() -> StateGraph:
 def analyze_watchlist(stock_codes: List[str]) -> str:
     """批量分析自选股，生成含股价、数据、ESG、舆情的综合报告
 
-    每只股票并行获取：市值、收盘价、DCF、评估、ROE、ROIC、毛利率、
-    净利率、股息率、三机构ESG评级；同时获取市场舆情。
+    使用统一数据层 data_layer.fetch_stock_data() 获取 12 维数据。
 
     Args:
         stock_codes: 股票代码列表
@@ -315,55 +315,28 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
     """
     import json
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from .news_mcp import get_news_sentiment
+    from .data_layer import fetch_stock_data, fetch_sentiment
 
     llm = _create_llm(temperature=0.3)
     stock_codes = stock_codes[:10]
 
-    # Step 1: 整批获取舆情 + 逐只获取多维度数据
+    # Step 1: 并行获取 舆情 + 逐只股票全维度数据
     with ThreadPoolExecutor(max_workers=6) as outer:
-        f_sentiment = outer.submit(get_news_sentiment)
-
-        def _fetch_one_stock(code):
-            info = {"code": code, "name": code}
-            with ThreadPoolExecutor(max_workers=4) as inner:
-                tasks = {
-                    "market": inner.submit(_call_mcp_tool_sync, "stk_market_value", {"security_code": code}),
-                    "dcf": inner.submit(_call_mcp_tool_sync, "stk_dcf", {"security_code": code}),
-                    "eval": inner.submit(_call_mcp_tool_sync, "stk_eval", {"security_code": code}),
-                    "roe": inner.submit(_call_mcp_tool_sync, "stk_eval_filter_by_roe_1y", {"security_code": code}),
-                    "roic": inner.submit(_call_mcp_tool_sync, "stk_eval_filter_by_roic_1y", {"security_code": code}),
-                    "gpm": inner.submit(_call_mcp_tool_sync, "stk_eval_filter_by_gpm_1y", {"security_code": code}),
-                    "npm": inner.submit(_call_mcp_tool_sync, "stk_eval_filter_by_npm_1y", {"security_code": code}),
-                    "div": inner.submit(_call_mcp_tool_sync, "stk_eval_filter_by_div_rate", {"security_code": code}),
-                    "esg_m": inner.submit(_call_mcp_tool_sync, "miotech_esg_rating", {"security_code": code}),
-                    "esg_c": inner.submit(_call_mcp_tool_sync, "chindices_esg_rating", {"security_code": code}),
-                    "esg_s": inner.submit(_call_mcp_tool_sync, "syntaogf_esg_rating", {"security_code": code}),
-                }
-                for key, fut in tasks.items():
-                    try:
-                        info[key] = _safe_json(fut.result(timeout=15))
-                    except Exception:
-                        info[key] = {}
-                # 取股票名称
-                if info["market"]:
-                    info["name"] = info["market"].get("security_name", code)
-            return code, info
+        f_sentiment = outer.submit(fetch_sentiment)
 
         stock_data = {}
         with ThreadPoolExecutor(max_workers=min(len(stock_codes), 5)) as pool:
-            futures = {pool.submit(_fetch_one_stock, c): c for c in stock_codes}
+            futures = {pool.submit(fetch_stock_data, c): c for c in stock_codes}
             for f in as_completed(futures):
-                code, info = f.result()
-                stock_data[code] = info
+                code = futures[f]
+                stock_data[code] = f.result()
 
         try:
-            sentiment_raw = f_sentiment.result(timeout=20)
-            sentiment = json.loads(sentiment_raw) if isinstance(sentiment_raw, str) else sentiment_raw
+            sentiment = f_sentiment.result(timeout=20)
         except Exception:
             sentiment = {"error": "舆情获取失败"}
 
-    # Step 2: 构建完整数据摘要（非截断）
+    # Step 2: 构建完整数据摘要
     data_blocks = []
     for code, info in stock_data.items():
         mv = info.get("market", {})
@@ -375,7 +348,7 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
 
         block = f"""### {info['name']}（{code}）
 
-**行情**：收盘 {mv.get('close_price','?')} 元 | 市值 {_fmt_cap(mv.get('total_market_cap','?'))} | 总股本 {mv.get('total_shares','?')}
+**行情**：收盘 {mv.get('close_price','?')} 元 | 市值 {fmt_cap(mv.get('total_market_cap','?'))} | 总股本 {mv.get('total_shares','?')}
 
 **DCF估值**：{json.dumps(dcf, ensure_ascii=False)[:300] if dcf else '无数据'}
 
@@ -432,7 +405,6 @@ def debate_watchlist(stock_codes: List[str]) -> str:
     """8-Agent 囚徒困境辩论投票，生成买卖建议报告
 
     仅在用户明确要求买卖建议时调用。
-    包含：Bull/Bear 对抗辩论 → 独立打分 → 囚徒困境 → 加权投票 → 买入提醒。
 
     Args:
         stock_codes: 股票代码列表
@@ -441,7 +413,7 @@ def debate_watchlist(stock_codes: List[str]) -> str:
         辩论投票报告（Markdown，含投票明细和买入信号）
     """
     import json
-    from .debate_agent import debate_batch
+    from .analysts import debate_batch
 
     llm = _create_llm(temperature=0.3)
     stock_codes = stock_codes[:10]
@@ -508,27 +480,6 @@ def debate_watchlist(stock_codes: List[str]) -> str:
     return final_report
 
 
-def _safe_json(data):
-    """安全解析 JSON"""
-    import json
-    if isinstance(data, dict):
-        return data
-    try:
-        return json.loads(data)
-    except (json.JSONDecodeError, TypeError):
-        return {"text": str(data)[:500]}
-
-
-def _fmt_cap(value):
-    """格式化市值"""
-    if isinstance(value, (int, float)):
-        if value > 1e12:
-            return f"{value/1e12:.2f}万亿"
-        elif value > 1e8:
-            return f"{value/1e8:.2f}亿"
-    return str(value)
-
-
 def get_market_overview() -> str:
     """获取每日大盘综合报告
 
@@ -566,13 +517,13 @@ def get_market_overview() -> str:
         code, label = code_label
         try:
             raw = _call_mcp_tool_sync("stk_market_value", {"security_code": code})
-            d = _safe_json(raw)
+            d = safe_json(raw)
             if d.get("security_name"):
                 return {
                     "name": d.get("security_name", code),
                     "label": label,
                     "price": d.get("close_price", "--"),
-                    "cap": _fmt_cap(d.get("total_market_cap", 0)),
+                    "cap": fmt_cap(d.get("total_market_cap", 0)),
                 }
         except Exception as e:
             logger.warning(f"获取 {code} 数据失败: {e}")
@@ -706,14 +657,21 @@ def _is_buy_sell_intent(text: str) -> bool:
     return any(kw in text for kw in keywords)
 
 
+def _maybe_debate(message: str) -> str:
+    """若用户消息含股票代码 + 买卖意图 → 返回辩论文本（含分隔符），否则返回 ''"""
+    codes = _extract_stock_codes(message)
+    if not codes or not _is_buy_sell_intent(message):
+        return ""
+    try:
+        debate = debate_watchlist(codes)
+        return f"\n\n---\n\n##  8-Agent 辩论投票\n\n{debate}"
+    except Exception as e:
+        logger.warning(f"辩论触发失败: {e}")
+        return ""
+
+
 def chat(message: str, thread_id: str = "default") -> Dict[str, Any]:
-    """同步对话接口（带上下文记忆）
-
-    若用户请求买卖建议且含股票代码，自动触发 8-Agent 辩论投票。
-
-    Args:
-        message: 用户消息
-        thread_id: 会话线程ID（跨轮持久化记忆）
+    """同步对话接口（带上下文记忆）。若含买卖意图则自动触发辩论。
 
     Returns:
         {"response": str, "agent": str}
@@ -721,25 +679,16 @@ def chat(message: str, thread_id: str = "default") -> Dict[str, Any]:
     graph = get_graph()
     config = {"configurable": {"thread_id": thread_id}}
 
-    state = {"messages": [HumanMessage(content=message)]}
-
-    result = graph.invoke(state, config)
+    result = graph.invoke({"messages": [HumanMessage(content=message)]}, config)
     final_msg = result["messages"][-1] if result.get("messages") else None
     response_text = final_msg.content if final_msg else "抱歉，无法处理您的请求。"
 
     # 买卖建议 → 自动触发辩论
-    codes = _extract_stock_codes(message)
-    if codes and _is_buy_sell_intent(message):
-        try:
-            debate = debate_watchlist(codes)
-            response_text += f"\n\n---\n\n##  8-Agent 辩论投票\n\n{debate}"
-        except Exception as e:
-            logger.warning(f"辩论触发失败: {e}")
+    debate_text = _maybe_debate(message)
+    if debate_text:
+        response_text += debate_text
 
-    return {
-        "response": response_text,
-        "agent": result.get("next_agent", "unknown"),
-    }
+    return {"response": response_text, "agent": result.get("next_agent", "unknown")}
 
 
 async def chat_async(message: str, thread_id: str = "default") -> Dict[str, Any]:
@@ -750,33 +699,25 @@ async def chat_async(message: str, thread_id: str = "default") -> Dict[str, Any]
 
 
 def chat_stream(message: str, thread_id: str = "default"):
-    """流式对话接口（带上下文记忆）
-
-    若用户请求买卖建议且含股票代码，流式输出结束后自动追加辩论结果。
+    """流式对话接口（带上下文记忆）。若含买卖意图则流式结束后追加辩论。
 
     Yields:
-        {"type": "agent", "name": str}  — Agent 切换
-        {"type": "content", "text": str} — 内容块
-        {"type": "done", "agent": str, "response": str} — 完成
-        {"type": "debate_signal", "text": str} — 辩论报告（仅买卖建议请求）
+        {"type": "agent"|"content"|"done"|"debate_signal", ...}
     """
     graph = get_graph()
     config = {"configurable": {"thread_id": thread_id}}
 
-    state = {"messages": [HumanMessage(content=message)]}
-
     last_agent = "supervisor"
     last_event = None
 
-    for event in graph.stream(state, config, stream_mode="values"):
+    for event in graph.stream({"messages": [HumanMessage(content=message)]}, config, stream_mode="values"):
         last_event = event
         agent_name = event.get("next_agent", "")
-
         if agent_name and agent_name != last_agent:
             yield {"type": "agent", "name": agent_name}
             last_agent = agent_name
 
-    # 拿到最终回复
+    # 最终回复
     final_text = ""
     if last_event:
         all_messages = last_event.get("messages", [])
@@ -784,25 +725,18 @@ def chat_stream(message: str, thread_id: str = "default"):
             if isinstance(m, AIMessage):
                 final_text = m.content
                 break
-
     if not final_text:
         final_text = "抱歉，无法处理您的请求。"
 
-    # 模拟流式逐字输出
     import time
     chunk_size = 15
     for i in range(0, len(final_text), chunk_size):
-        chunk = final_text[i:i+chunk_size]
-        yield {"type": "content", "text": chunk}
+        yield {"type": "content", "text": final_text[i:i + chunk_size]}
         time.sleep(0.02)
 
     yield {"type": "done", "agent": last_agent, "response": final_text}
 
-    # 买卖建议 → 自动触发辩论
-    codes = _extract_stock_codes(message)
-    if codes and _is_buy_sell_intent(message):
-        try:
-            debate = debate_watchlist(codes)
-            yield {"type": "debate_signal", "text": debate}
-        except Exception as e:
-            logger.warning(f"辩论触发失败: {e}")
+    # 买卖建议 → 辩论
+    debate_text = _maybe_debate(message)
+    if debate_text:
+        yield {"type": "debate_signal", "text": debate_text}
