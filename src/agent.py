@@ -302,16 +302,16 @@ def get_graph() -> StateGraph:
 # ---------- 对话接口 ----------
 
 def analyze_watchlist(stock_codes: List[str]) -> str:
-    """批量分析自选股，生成含数据+舆情+ESG的原始报告
+    """批量分析自选股，生成含股价、数据、ESG、舆情的综合报告
 
-    每只股票调用：市值、综合评估、ESG评级；
-    同时获取市场舆情情绪。
+    每只股票并行获取：市值、收盘价、DCF、评估、ROE、ROIC、毛利率、
+    净利率、股息率、三机构ESG评级；同时获取市场舆情。
 
     Args:
         stock_codes: 股票代码列表
 
     Returns:
-        格式化的分析报告（Markdown，含股价、数据、舆情、ESG）
+        格式化的综合分析报告（Markdown）
     """
     import json
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -320,33 +320,37 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
     llm = _create_llm(temperature=0.3)
     stock_codes = stock_codes[:10]
 
-    # 并行：数据获取 + 舆情获取
+    # Step 1: 整批获取舆情 + 逐只获取多维度数据
     with ThreadPoolExecutor(max_workers=6) as outer:
         f_sentiment = outer.submit(get_news_sentiment)
 
         def _fetch_one_stock(code):
             info = {"code": code, "name": code}
-            with ThreadPoolExecutor(max_workers=3) as inner:
-                f_mv = inner.submit(_call_mcp_tool_sync, "stk_market_value", {"security_code": code})
-                f_ev = inner.submit(_call_mcp_tool_sync, "stk_eval", {"security_code": code})
-                f_esg = inner.submit(_call_mcp_tool_sync, "miotech_esg_rating", {"security_code": code})
-                try:
-                    info["market"] = _safe_json(f_mv.result(timeout=15))
+            with ThreadPoolExecutor(max_workers=4) as inner:
+                tasks = {
+                    "market": inner.submit(_call_mcp_tool_sync, "stk_market_value", {"security_code": code}),
+                    "dcf": inner.submit(_call_mcp_tool_sync, "stk_dcf", {"security_code": code}),
+                    "eval": inner.submit(_call_mcp_tool_sync, "stk_eval", {"security_code": code}),
+                    "roe": inner.submit(_call_mcp_tool_sync, "stk_eval_filter_by_roe_1y", {"security_code": code}),
+                    "roic": inner.submit(_call_mcp_tool_sync, "stk_eval_filter_by_roic_1y", {"security_code": code}),
+                    "gpm": inner.submit(_call_mcp_tool_sync, "stk_eval_filter_by_gpm_1y", {"security_code": code}),
+                    "npm": inner.submit(_call_mcp_tool_sync, "stk_eval_filter_by_npm_1y", {"security_code": code}),
+                    "div": inner.submit(_call_mcp_tool_sync, "stk_eval_filter_by_div_rate", {"security_code": code}),
+                    "esg_m": inner.submit(_call_mcp_tool_sync, "miotech_esg_rating", {"security_code": code}),
+                    "esg_c": inner.submit(_call_mcp_tool_sync, "chindices_esg_rating", {"security_code": code}),
+                    "esg_s": inner.submit(_call_mcp_tool_sync, "syntaogf_esg_rating", {"security_code": code}),
+                }
+                for key, fut in tasks.items():
+                    try:
+                        info[key] = _safe_json(fut.result(timeout=15))
+                    except Exception:
+                        info[key] = {}
+                # 取股票名称
+                if info["market"]:
                     info["name"] = info["market"].get("security_name", code)
-                except Exception:
-                    info["market"] = {}
-                try:
-                    info["eval"] = _safe_json(f_ev.result(timeout=15))
-                except Exception:
-                    info["eval"] = {}
-                try:
-                    info["esg"] = _safe_json(f_esg.result(timeout=15))
-                except Exception:
-                    info["esg"] = {}
             return code, info
 
         stock_data = {}
-
         with ThreadPoolExecutor(max_workers=min(len(stock_codes), 5)) as pool:
             futures = {pool.submit(_fetch_one_stock, c): c for c in stock_codes}
             for f in as_completed(futures):
@@ -359,37 +363,66 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
         except Exception:
             sentiment = {"error": "舆情获取失败"}
 
-    # 构建数据摘要
-    summary_lines = []
+    # Step 2: 构建完整数据摘要（非截断）
+    data_blocks = []
     for code, info in stock_data.items():
         mv = info.get("market", {})
+        dcf = info.get("dcf", {})
         ev = info.get("eval", {})
-        esg = info.get("esg", {})
-        summary_lines.append(
-            f"| {info['name']}({code}) "
-            f"| 收盘 {mv.get('close_price','?')} "
-            f"| 市值 {_fmt_cap(mv.get('total_market_cap','?'))} "
-            f"| ESG {esg.get('esg_rate','?')} "
-            f"| 评估: {str(ev)[:100]} |"
-        )
+        esg_m = info.get("esg_m", {})
+        esg_c = info.get("esg_c", {})
+        esg_s = info.get("esg_s", {})
 
-    report_prompt = f"""你是一位资深投资分析师。以下是自选股数据和市场舆情：
+        block = f"""### {info['name']}（{code}）
+
+**行情**：收盘 {mv.get('close_price','?')} 元 | 市值 {_fmt_cap(mv.get('total_market_cap','?'))} | 总股本 {mv.get('total_shares','?')}
+
+**DCF估值**：{json.dumps(dcf, ensure_ascii=False)[:300] if dcf else '无数据'}
+
+**综合评估**：{json.dumps(ev, ensure_ascii=False)[:800] if ev else '无数据'}
+
+**盈利指标**：
+- ROE：{json.dumps(info.get('roe',{}), ensure_ascii=False)[:200]}
+- ROIC：{json.dumps(info.get('roic',{}), ensure_ascii=False)[:200]}
+- 毛利率：{json.dumps(info.get('gpm',{}), ensure_ascii=False)[:150]}
+- 净利率：{json.dumps(info.get('npm',{}), ensure_ascii=False)[:150]}
+- 股息率：{json.dumps(info.get('div',{}), ensure_ascii=False)[:150]}
+
+**ESG评级**：妙盈 {esg_m.get('esg_rate','?')} | 华证 {esg_c.get('esg_rate','?')} | 商道融绿 {esg_s.get('esg_rate','?')}"""
+        data_blocks.append(block)
+
+    # Step 3: 生成报告
+    report_prompt = f"""你是一位资深投资分析师。以下是自选股多维数据和市场舆情。
 
 【股票数据】
-{chr(10).join(summary_lines)}
+{chr(10).join(data_blocks)[:6000]}
 
-【市场舆情情绪】
-{json.dumps(sentiment, ensure_ascii=False, indent=2)[:2000]}
+【市场舆情情绪】来源：财联社/雪球/华尔街见闻
+{json.dumps(sentiment, ensure_ascii=False, indent=2)[:2500]}
 
-请生成一份专业的自选股分析报告，**必须包含以下所有板块**：
+请按以下结构生成专业的自选股分析报告：
 
-1. **概览** — 组合整体特征（行业分布、市值规模等）
-2. **估值对比** — 各股票估值水平横向对比
-3. **ESG 表现** — ESG评级对比
-4. **舆情分析** — 逐只股票打分（-100~100），结合市场情绪和个股关联新闻
-5. **综合建议** — 基于以上全部数据给出投资参考（仅供参考，不构成投资意见）
+## 1.  行情概览
+- 表格式列出全部股票的：代码 | 名称 | 收盘价 | 市值
+- 组合整体特征评述
 
-用 Markdown 格式输出，语言专业但不晦涩。不要编造报告日期、分析师署名等元信息。"""
+## 2.  估值分析
+- DCF估值解读，横向对比
+- 综合评估关键指标（ROE、ROIC、毛利率、净利率、股息率）解读和对比
+
+## 3.  ESG表现
+- 三机构（妙盈/华证/商道融绿）ESG评级对比表
+- ESG风险与机会分析
+
+## 4.  舆情分析
+- 逐只股票情绪打分（-100到100，正数乐观，负数悲观）
+- 市场整体情绪判断
+- 个股关联新闻和政策动向
+
+## 5.  综合参考
+- 基于以上全部数据的投资参考（仅供参考，不构成投资意见）
+
+用 Markdown 格式输出。不要编造报告日期、分析师署名、数据来源等元信息。"""
 
     response = llm.invoke([SystemMessage(content=report_prompt)])
     return response.content
