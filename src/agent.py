@@ -336,7 +336,7 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
         except Exception:
             sentiment = {"error": "舆情获取失败"}
 
-    # Step 2: 构建完整数据摘要
+    # Step 2: 构建完整数据摘要（MCP + AKShare 双源）
     data_blocks = []
     for code, info in stock_data.items():
         mv = info.get("market", {})
@@ -345,14 +345,49 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
         esg_m = info.get("esg_m", {})
         esg_c = info.get("esg_c", {})
         esg_s = info.get("esg_s", {})
+        ak = info.get("akshare", {})
 
-        block = f"""### {info['name']}（{code}）
+        # AKShare 财务指标
+        fin = ak.get("financials", {}).get("latest", {})
+        fin_parts = []
+        if fin.get("roe") is not None:
+            fin_parts.append(f"ROE: {fin['roe']}%")
+        if fin.get("npm") is not None:
+            fin_parts.append(f"净利率: {fin['npm']}%")
+        if fin.get("gpm") is not None:
+            fin_parts.append(f"毛利率: {fin['gpm']}%")
+        if fin.get("revenue_growth") is not None:
+            fin_parts.append(f"营收增长: {fin['revenue_growth']}%")
+        if fin.get("profit_growth") is not None:
+            fin_parts.append(f"净利增长: {fin['profit_growth']}%")
+        if fin.get("debt_ratio") is not None:
+            fin_parts.append(f"负债率: {fin['debt_ratio']}%")
+        fin_text = " | ".join(fin_parts) if fin_parts else "暂无"
+
+        # AKShare 估值
+        val = ak.get("valuation", {})
+        val_parts = []
+        if val.get("pe"):
+            val_parts.append(f"PE: {val['pe']}")
+        if val.get("pb"):
+            val_parts.append(f"PB: {val['pb']}")
+        val_text = " | ".join(val_parts) if val_parts else "暂无"
+
+        # AKShare 行业
+        stock_info = ak.get("stock_info", {})
+        industry = stock_info.get("industry", "未知")
+
+        block = f"""### {info['name']}（{code}）| 行业：{industry}
 
 **行情**：收盘 {mv.get('close_price','?')} 元 | 市值 {fmt_cap(mv.get('total_market_cap','?'))} | 总股本 {mv.get('total_shares','?')}
 
+**估值**：{val_text}
+
 **DCF估值**：{json.dumps(dcf, ensure_ascii=False)[:300] if dcf else '无数据'}
 
-**综合评估**（含 ROE、ROIC、毛利率、净利率、股息率等财务指标）：{json.dumps(ev, ensure_ascii=False)[:1200] if ev else '无数据'}
+**综合评估（MCP）**：{json.dumps(ev, ensure_ascii=False)[:1200] if ev else '无数据'}
+
+**最新财务指标（AKShare 实时）**：{fin_text}
 
 **ESG评级**：妙盈 {esg_m.get('esg_rate','?')} | 华证 {esg_c.get('esg_rate','?')} | 商道融绿 {esg_s.get('esg_rate','?')}"""
         data_blocks.append(block)
@@ -526,10 +561,11 @@ def get_market_overview() -> str:
         return None
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        # 同时提交：7只个股 + 板块 + 新闻
+        # 同时提交：7只个股 + 板块 + 新闻 + 市场估值
         stock_futures = {pool.submit(_fetch_one_stock, item): item for item in BENCHMARK_STOCKS.items()}
         sector_future = pool.submit(get_sector_overview_text)
         news_future = pool.submit(_fetch_market_news)
+        pe_pb_future = pool.submit(_fetch_market_pe_pb_text)
 
         # 收集个股
         stock_data = []
@@ -538,9 +574,10 @@ def get_market_overview() -> str:
             if result:
                 stock_data.append(result)
 
-        # 等待板块和新闻
+        # 等待板块、新闻、估值
         sector_text = sector_future.result()
         news_text = news_future.result()
+        pe_pb_text = pe_pb_future.result()
 
     # ── LLM 汇总 ──
     stock_json = json.dumps(stock_data, ensure_ascii=False, indent=2)
@@ -554,6 +591,9 @@ def get_market_overview() -> str:
 
 【市场热点新闻】
 {news_text}
+
+【全市场估值（AKShare 实时）】
+{pe_pb_text}
 
 请按以下结构生成「今日市场综合报告」：
 
@@ -624,6 +664,16 @@ def _fetch_market_news() -> str:
     except Exception as e:
         logger.warning(f"获取新闻数据失败: {e}")
         return "新闻数据暂不可用"
+
+
+def _fetch_market_pe_pb_text() -> str:
+    """获取A股全市场PE/PB估值（AKShare）"""
+    try:
+        from .sector_data import get_market_overview_akshare_text
+        return get_market_overview_akshare_text()
+    except Exception as e:
+        logger.warning(f"市场PE/PB获取失败: {e}")
+        return ""
 
 
 @tool

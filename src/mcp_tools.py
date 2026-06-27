@@ -155,18 +155,34 @@ class NoArgInput(BaseModel):
     pass
 
 
+class FilterToolInput(BaseModel):
+    """筛选工具输入 — filter_value + filter_type"""
+    filter_value: float = Field(description="筛选阈值（百分比数值，如 15 表示 ≥15%）")
+    filter_type: int = Field(description="筛选方式：1=大于, 2=大于等于, 3=小于, 4=小于等于, 5=等于")
+
+
 class MCPTool(BaseTool):
     """通用MCP工具封装 - 适配所有MCP金融数据工具"""
 
     def __init__(self, tool_meta: dict, **kwargs):
         t_name = tool_meta["name"]
         t_desc = tool_meta["description"]
-        has_args = len(tool_meta.get("parameters", {}).get("required", [])) > 0
+        required_params = tool_meta.get("parameters", {}).get("required", [])
+        has_args = len(required_params) > 0
+
+        # 筛选工具用 FilterToolInput，单股查询用 StockToolInput
+        is_filter = "filter_value" in required_params
+        if is_filter:
+            schema = FilterToolInput
+        elif has_args:
+            schema = StockToolInput
+        else:
+            schema = NoArgInput
 
         super().__init__(
             name=t_name,
             description=t_desc,
-            args_schema=StockToolInput if has_args else NoArgInput,
+            args_schema=schema,
             **kwargs,
         )
         self._tool_name = t_name

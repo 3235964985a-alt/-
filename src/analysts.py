@@ -151,7 +151,25 @@ def _classify_stock_type(data: Dict[str, Any]) -> str:
         except ValueError:
             pass
 
-    if roe_score >= 2 and div_score <= 1:
+    # 优先从 akshare 财务指标取结构化数据（更精确）
+    fin = data.get("akshare", {}).get("financials", {}).get("latest", {})
+    if fin.get("roe") is not None:
+        try:
+            roe_val = float(fin["roe"])
+            if roe_val > 20:
+                roe_score = 2
+            elif roe_val > 10:
+                roe_score = 1
+        except (ValueError, TypeError):
+            pass
+    if fin.get("npm") is not None and div_score == 0:
+        # 净利率特别高（>30%）通常不分红 → 偏growth
+        try:
+            npm_val = float(fin["npm"])
+            if npm_val > 30:
+                roe_score = max(roe_score, 1)
+        except (ValueError, TypeError):
+            pass
         return "growth"
     elif div_score >= 2 and roe_score <= 1:
         return "value"
@@ -420,6 +438,18 @@ def _build_data_summary(stock_data: Dict[str, Any], sentiment: Dict[str, Any]) -
     parts.append(f"市场舆情: {json.dumps(sentiment, ensure_ascii=False)[:300]}")
     if d.get("survey"):
         parts.append(f"机构调研: {json.dumps(d['survey'], ensure_ascii=False)[:150]}")
+
+    # AKShare 补充数据
+    ak = d.get("akshare", {})
+    fin = ak.get("financials", {}).get("latest", {})
+    if fin:
+        parts.append(f"最新财务指标（AKShare）: {json.dumps(fin, ensure_ascii=False)[:400]}")
+    val = ak.get("valuation", {})
+    if val:
+        parts.append(f"估值数据（AKShare）: {json.dumps(val, ensure_ascii=False)[:200]}")
+    stock_info = ak.get("stock_info", {})
+    if stock_info.get("industry"):
+        parts.append(f"行业: {stock_info['industry']}")
 
     sector_info = fetch_sector_trend()
     if sector_info:

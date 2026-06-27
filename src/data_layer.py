@@ -38,15 +38,41 @@ def fmt_cap(value) -> str:
 # ---------- 单只股票全维度数据 ----------
 
 def fetch_stock_data(code: str) -> Dict[str, Any]:
-    """并行获取一只股票的所有维度数据（7 个 MCP 工具）
+    """并行获取一只股票的全维度数据（7 MCP + 4 AKShare）
+
+    MCP 数据：市值、DCF、综合评估、调研、3机构ESG
+    AKShare 补充：个股信息、财务指标、财报摘要、估值概要
 
     注意：stk_eval_filter_by_* 系列是全局筛选器，不支持单只股票查询。
-    单只股票的 ROE/ROIC/毛利率/净利率/股息率 信息包含在 stk_eval 的综合评估文本中。
+    单只股票的 ROE/ROIC/毛利率/净利率/股息率 从 stk_eval 文本和 akshare 财务指标双源获取。
 
     返回:
-        {code, name, market, eval, survey, dcf, esg_m, esg_c, esg_s}
+        {code, name, market, eval, survey, dcf, esg_m, esg_c, esg_s,
+         akshare: {stock_info, financials, abstract, valuation}}
     """
+    from .akshare_data import fetch_stock_akshare
+
     data: Dict[str, Any] = {"code": code, "name": code}
+
+    # MCP + AKShare 双管齐下
+    with ThreadPoolExecutor(max_workers=2) as dual:
+        f_mcp = dual.submit(_fetch_mcp_batch, code)
+        f_ak = dual.submit(fetch_stock_akshare, code)
+
+        # MCP 数据
+        mcp_data = f_mcp.result()
+        for k, v in mcp_data.items():
+            data[k] = v
+
+        # AKShare 补充
+        data["akshare"] = f_ak.result()
+
+    return data
+
+
+def _fetch_mcp_batch(code: str) -> Dict[str, Any]:
+    """仅 MCP 数据获取（7 个工具并行）"""
+    data: Dict[str, Any] = {}
 
     with ThreadPoolExecutor(max_workers=7) as pool:
         tasks = {
@@ -65,8 +91,8 @@ def fetch_stock_data(code: str) -> Dict[str, Any]:
             except Exception:
                 data[key] = {}
 
-    # 取股票名称
-    if data["market"]:
+    # 取股票名称（优先 MCP，其次 akshare）
+    if data.get("market"):
         data["name"] = data["market"].get("security_name", code)
 
     return data

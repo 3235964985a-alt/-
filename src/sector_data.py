@@ -167,3 +167,53 @@ def get_sector_overview_text() -> str:
         lines.append(f"- {item.get('板块名称','?')}: {item.get('涨跌幅','')}%")
 
     return "\n".join(lines)
+
+
+# ---------- 市场PE/PB 估值 ----------
+
+def get_market_pe_pb() -> Dict[str, Any]:
+    """获取全市场 PE/PB 估值（AKShare）
+
+    Returns:
+        {pe, pb, date}
+    """
+    try:
+        import akshare as ak
+        df = ak.stock_a_lg_indicator()
+        if df is None or len(df) == 0:
+            return {}
+        latest = df.iloc[-1].to_dict()
+        return {
+            "pe": _safe_float(latest.get("沪深两市平均市盈率", latest.get("市盈率", None))),
+            "pb": _safe_float(latest.get("沪深两市平均市净率", latest.get("市净率", None))),
+            "date": str(latest.get("日期", latest.get("date", ""))),
+        }
+    except Exception as e:
+        logger.debug(f"市场PE/PB获取失败: {e}")
+        return {}
+
+
+def get_market_overview_akshare_text() -> str:
+    """AKShare 市场概览文本（供 tool 使用）"""
+    pe_pb = get_market_pe_pb()
+    if not pe_pb:
+        return ""
+
+    parts = ["##  A股市场估值（AKShare）"]
+    if pe_pb.get("date"):
+        parts.append(f"- 数据日期：{pe_pb['date']}")
+    if pe_pb.get("pe"):
+        pe = pe_pb["pe"]
+        parts.append(f"- 沪深两市平均市盈率(PE): {pe}")
+    if pe_pb.get("pb"):
+        pb = pe_pb["pb"]
+        parts.append(f"- 沪深两市平均市净率(PB): {pb}")
+
+    return "\n".join(parts)
+
+
+def _safe_float(val) -> Optional[float]:
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
