@@ -303,9 +303,9 @@ def get_graph() -> StateGraph:
 # ---------- 对话接口 ----------
 
 def analyze_watchlist(stock_codes: List[str]) -> str:
-    """批量分析自选股，生成对比报告
+    """批量分析自选股，生成对比报告（并行加速）
 
-    对每只股票依次调用：市值、综合评估、ESG评级
+    每只股票并行调用：市值、综合评估、ESG评级，
     然后由 LLM 汇总生成对比分析报告。
 
     Args:
@@ -315,36 +315,42 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
         格式化的分析报告字符串
     """
     import json
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     llm = _create_llm(temperature=0.3)
 
-    # 收集每只股票的数据
-    stock_data = {}
-    for code in stock_codes[:10]:  # 最多10只，避免超时
-        logger.info(f"正在分析自选股: {code}")
+    # 并行收集每只股票的数据
+    def _fetch_one_stock(code):
+        """并行：同时取市值+评估+ESG"""
         info = {"code": code, "name": code}
+        with ThreadPoolExecutor(max_workers=3) as inner:
+            f_mv = inner.submit(_call_mcp_tool_sync, "stk_market_value", {"security_code": code})
+            f_ev = inner.submit(_call_mcp_tool_sync, "stk_eval", {"security_code": code})
+            f_esg = inner.submit(_call_mcp_tool_sync, "miotech_esg_rating", {"security_code": code})
 
-        try:
-            mv = _call_mcp_tool_sync("stk_market_value", {"security_code": code})
-            mv_data = _safe_json(mv)
-            info["market"] = mv_data
-            info["name"] = mv_data.get("security_name", code)
-        except Exception:
-            info["market"] = {"error": "获取失败"}
+            try:
+                info["market"] = _safe_json(f_mv.result(timeout=10))
+                info["name"] = info["market"].get("security_name", code)
+            except Exception:
+                info["market"] = {}
+            try:
+                info["eval"] = _safe_json(f_ev.result(timeout=10))
+            except Exception:
+                info["eval"] = {}
+            try:
+                info["esg"] = _safe_json(f_esg.result(timeout=10))
+            except Exception:
+                info["esg"] = {}
+        return code, info
 
-        try:
-            ev = _call_mcp_tool_sync("stk_eval", {"security_code": code})
-            info["eval"] = _safe_json(ev)
-        except Exception:
-            info["eval"] = {"error": "获取失败"}
+    stock_data = {}
+    max_stocks = stock_codes[:10]
 
-        try:
-            esg = _call_mcp_tool_sync("miotech_esg_rating", {"security_code": code})
-            info["esg"] = _safe_json(esg)
-        except Exception:
-            info["esg"] = {"error": "获取失败"}
-
-        stock_data[code] = info
+    with ThreadPoolExecutor(max_workers=min(len(max_stocks), 5)) as pool:
+        futures = {pool.submit(_fetch_one_stock, c): c for c in max_stocks}
+        for f in as_completed(futures):
+            code, info = f.result()
+            stock_data[code] = info
 
     # 构建 LLM 提示词
     summary_lines = []
