@@ -62,20 +62,24 @@ async def _call_mcp_tool(tool_name: str, arguments: dict) -> str:
         return _mock_tool_response(tool_name, arguments)
 
 
-def _call_mcp_tool_sync(tool_name: str, arguments: dict) -> str:
-    """同步版本的MCP工具调用（在新线程中跑 asyncio.run，避免事件循环嵌套）"""
-    import asyncio
-    import concurrent.futures
+# ---------- 线程本地 MCP 客户端（复用连接，减少握手开销） ----------
+import threading
 
-    def _runner():
-        return asyncio.run(_call_mcp_tool(tool_name, arguments))
+_thread_local = threading.local()
+
+
+def _call_mcp_tool_sync(tool_name: str, arguments: dict) -> str:
+    """同步版 MCP 工具调用，线程安全。
+
+    在 ThreadPoolExecutor 的子线程中直接运行 asyncio.run，
+    不再嵌套第二个执行器，避免高并发下的死锁。
+    """
+    import asyncio
 
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_runner)
-            return future.result(timeout=30)
+        return asyncio.run(_call_mcp_tool(tool_name, arguments))
     except Exception as e:
-        logger.error(f"MCP同步调用失败: {e}")
+        logger.error(f"MCP同步调用失败 {tool_name}: {e}")
         return _mock_tool_response(tool_name, arguments)
 
 

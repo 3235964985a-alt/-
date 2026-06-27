@@ -80,7 +80,7 @@ def _fetch_stock_data(code: str) -> Dict[str, Any]:
         except Exception:
             return {}
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         tasks = {
             "market": pool.submit(_try_fetch, "stk_market_value", {"security_code": code}),
             "eval": pool.submit(_try_fetch, "stk_eval", {"security_code": code}),
@@ -97,7 +97,10 @@ def _fetch_stock_data(code: str) -> Dict[str, Any]:
         }
 
         for key, future in tasks.items():
-            data[key] = future.result()
+            try:
+                data[key] = future.result(timeout=15)
+            except Exception:
+                data[key] = {}
 
     # 取股票名称
     if data["market"]:
@@ -657,7 +660,7 @@ def debate_batch(stock_codes: List[str]) -> List[Dict[str, Any]]:
         辩论结果列表，按 buy_signal 排序
     """
     results = []
-    with ThreadPoolExecutor(max_workers=min(len(stock_codes), 3)) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(stock_codes), 2)) as pool:
         futures = {pool.submit(debate_stock, c): c for c in stock_codes[:10]}
         for f in as_completed(futures):
             results.append(f.result())
