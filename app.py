@@ -89,11 +89,10 @@ st.markdown("""
 with st.sidebar:
     st.markdown("##  金融智能助手")
 
-    # 系统说明按钮
+    # 系统说明按钮 — 直接触发 dialog
     if st.button("  系统说明", use_container_width=True, type="secondary", key="btn_sysinfo",
                  help="查看多智能体架构、数据源、技术栈和功能列表"):
-        st.session_state.show_system_info = True
-        st.rerun()
+        show_system_dialog()
 
     st.markdown("---")
 
@@ -191,100 +190,52 @@ with st.sidebar:
     st.caption("© 2025 课程设计项目 | 金融智能对话系统")
 
 
-# ---------- 系统说明悬浮窗 ----------
-if st.session_state.get("show_system_info"):
+
+# ---------- 系统说明弹窗 ----------
+@st.dialog("  系统说明 — 金融智能助手", width="large")
+def show_system_dialog():
+    cols = st.columns(3)
+    cols[0].metric("  智能体", "5")
+    cols[1].metric("  MCP工具", "23")
+    cols[2].metric("  数据源", "4")
+
+    st.divider()
+    st.subheader("  多智能体架构")
     st.markdown("""
-    <style>
-        #sysinfo-overlay {
-            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.4); z-index: 99999;
-            display: flex; align-items: center; justify-content: center;
-        }
-        #sysinfo-dialog {
-            background: #fff; border-radius: 16px; padding: 0;
-            max-width: 680px; width: 90vw; max-height: 85vh;
-            overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.25);
-            font-size: 0.88rem; color: #1a1a2e;
-        }
-        #sysinfo-dialog .dialog-header {
-            display: flex; align-items: center;
-            padding: 16px 20px; background: linear-gradient(135deg, #3730a3, #5b21b6);
-            color: #fff; border-radius: 16px 16px 0 0;
-        }
-        #sysinfo-dialog .dialog-title { font-size: 1.1rem; font-weight: 700; }
-        #sysinfo-dialog .dialog-body {
-            padding: 8px 20px 0; max-height: 58vh; overflow-y: auto;
-        }
-        #sysinfo-dialog h4 { margin: 14px 0 6px; font-size: 0.95rem; color: #3730a3; }
-        #sysinfo-dialog table { width: 100%; font-size: 0.78rem; border-collapse: collapse; margin: 6px 0; }
-        #sysinfo-dialog td, #sysinfo-dialog th {
-            padding: 5px 8px; border-bottom: 1px solid #eee; text-align: left;
-        }
-        #sysinfo-dialog th { background: #f3f4f6; font-weight: 600; color: #555; }
-        #sysinfo-dialog ul { margin: 4px 0; padding-left: 18px; font-size: 0.82rem; }
-        #sysinfo-dialog li { margin: 3px 0; }
-        .stat-row { display: flex; gap: 16px; margin: 8px 0; }
-        .stat-item { background: #f3f4f6; border-radius: 8px; padding: 8px 14px; text-align: center; flex: 1; }
-        .stat-item big { font-size: 1.3rem; font-weight: 700; color: #3730a3; }
-    </style>
-    <div id="sysinfo-overlay">
-        <div id="sysinfo-dialog">
-            <div class="dialog-header">
-                <span class="dialog-title">  系统说明 — 金融智能助手</span>
-            </div>
-            <div class="dialog-body">
-                <div class="stat-row">
-                    <div class="stat-item"><big>5</big><br>智能体</div>
-                    <div class="stat-item"><big>23</big><br>MCP工具</div>
-                    <div class="stat-item"><big>4</big><br>数据源</div>
-                </div>
+    | Agent | 职能 | 工具 |
+    |---|---|---|
+    | 股票数据 | 个股市值、收盘价、调研 | 4 |
+    | 财务分析 | DCF估值、ROE/ROIC等10项筛选 | 10 |
+    | ESG评级 | 妙盈/华证/商道融绿三机构评级 | 3 |
+    | 财经新闻 | 14+新闻源 + LLM情绪评分 | 5 |
+    | 通用助手 | 金融知识问答 + RAG | 1 |
+    """)
 
-                <h4>  多智能体架构</h4>
-                <table>
-                <tr><th>Agent</th><th>职能</th><th>工具</th></tr>
-                <tr><td> 股票数据</td><td>个股市值、收盘价、调研</td><td>4</td></tr>
-                <tr><td> 财务分析</td><td>DCF估值、ROE/ROIC/毛利率/净利率/股息率筛选</td><td>10</td></tr>
-                <tr><td> ESG评级</td><td>妙盈科技/华证指数/商道融绿 三大机构评级</td><td>3</td></tr>
-                <tr><td> 财经新闻</td><td>财联社/雪球/华尔街见闻/知乎等14+源，含情绪评分</td><td>5</td></tr>
-                <tr><td> 通用助手</td><td>金融知识问答 + RAG知识库</td><td>1</td></tr>
-                </table>
+    st.subheader("  数据源")
+    st.markdown("""
+    | 来源 | 协议 | 内容 |
+    |---|---|---|
+    | 证券之星 | MCP (SSE) | 市值、DCF估值、ESG评级、筛选指标 |
+    | 东方财富 | AKShare | 概念板块(494) + 行业板块(496) 实时行情 |
+    | NewsNow | HTTP | 14+新闻源实时热点 + LLM情绪评分 |
+    | ChromaDB | 本地 | RAG金融知识库 |
+    """)
 
-                <h4>  数据源</h4>
-                <table>
-                <tr><th>来源</th><th>协议</th><th>内容</th></tr>
-                <tr><td>证券之星</td><td>MCP (SSE)</td><td>股票市值、DCF估值、ESG评级、筛选指标</td></tr>
-                <tr><td>东方财富</td><td>AKShare HTTP</td><td>概念板块(494) + 行业板块(496) 实时行情</td></tr>
-                <tr><td>NewsNow</td><td>HTTP API</td><td>14+新闻源实时热点 + LLM情绪评分</td></tr>
-                <tr><td>ChromaDB</td><td>本地</td><td>RAG金融知识库</td></tr>
-                </table>
+    st.subheader("✨ 技术栈")
+    st.markdown("""
+    - **LLM**: GPT-4o · **框架**: LangChain + LangGraph
+    - **协议**: MCP · **架构**: Supervisor-Worker
+    - **知识库**: RAG + ChromaDB · **截图识别**: EasyOCR
+    """)
 
-                <h4>✨ 技术栈</h4>
-                <ul>
-                <li>LLM: GPT-4o · 框架: LangChain + LangGraph</li>
-                <li>协议: MCP (Model Context Protocol) · 架构: Supervisor-Worker</li>
-                <li>知识库: RAG + ChromaDB · 截图识别: EasyOCR</li>
-                </ul>
-
-                <h4>  特色功能</h4>
-                <ul>
-                <li>大盘综合报告（龙头股 + 板块 + 新闻三路聚合）</li>
-                <li>板块轮动分析（概念/行业涨跌TOP5）</li>
-                <li>新闻情绪评分（三源LLM打分，-100~100）</li>
-                <li>持仓截图OCR识别（EasyOCR + LLM解析）</li>
-                <li>自选股多Agent协作分析</li>
-                <li>流式逐字输出</li>
-                </ul>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # 关闭按钮（Streamlit原生）
-    c1, c2, c3 = st.columns([2, 1, 2])
-    with c2:
-        if st.button("✕ 关闭", key="_dismiss_sysinfo", use_container_width=True, type="primary"):
-            st.session_state.show_system_info = False
-            st.rerun()
+    st.subheader("  特色功能")
+    st.markdown("""
+    - 大盘综合报告（龙头股 + 板块 + 新闻三路聚合）
+    - 板块轮动分析（概念/行业涨跌TOP5）
+    - 新闻情绪评分（三源LLM打分，-100~100）
+    - 持仓截图OCR识别（EasyOCR + LLM解析）
+    - 自选股多Agent协作分析 · 流式逐字输出
+    """)
 
 
 # ---------- 主体 ----------
@@ -300,8 +251,6 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
-if "show_system_info" not in st.session_state:
-    st.session_state.show_system_info = False
 
 # 欢迎消息
 if not st.session_state.messages:
