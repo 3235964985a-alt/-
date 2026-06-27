@@ -302,95 +302,77 @@ def get_graph() -> StateGraph:
 # ---------- 对话接口 ----------
 
 def analyze_watchlist(stock_codes: List[str]) -> str:
-    """批量分析自选股，生成对比报告（并行加速）
+    """批量分析自选股，生成含 7-Agent 辩论投票的对比报告
 
-    每只股票并行调用：市值、综合评估、ESG评级；
-    同时获取市场舆情情绪评分，由 LLM 汇总生成含舆情分析的对比报告。
+    流程：
+    1. 7 Agent 两轮囚徒困境辩论（并行）
+    2. LLM 汇总生成含投票明细+买入信号的报告
 
     Args:
         stock_codes: 股票代码列表
 
     Returns:
-        格式化的分析报告字符串
+        格式化的分析报告字符串（含辩论结果）
     """
     import json
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from .news_mcp import get_news_sentiment
+    from .debate_agent import debate_batch
 
     llm = _create_llm(temperature=0.3)
+    stock_codes = stock_codes[:10]
 
-    # 并行：数据获取 + 舆情获取
-    with ThreadPoolExecutor(max_workers=6) as outer:
-        f_sentiment = outer.submit(get_news_sentiment)
+    # 7 Agent 辩论（并行）
+    debates = debate_batch(stock_codes)
 
-        def _fetch_one_stock(code):
-            """并行：同时取市值+评估+ESG"""
-            info = {"code": code, "name": code}
-            with ThreadPoolExecutor(max_workers=3) as inner:
-                f_mv = inner.submit(_call_mcp_tool_sync, "stk_market_value", {"security_code": code})
-                f_ev = inner.submit(_call_mcp_tool_sync, "stk_eval", {"security_code": code})
-                f_esg = inner.submit(_call_mcp_tool_sync, "miotech_esg_rating", {"security_code": code})
+    # 构建辩论摘要
+    debate_lines = []
+    for d in debates:
+        code = d["stock_code"]
+        name = d["stock_name"]
+        vs = d["vote_summary"]
+        signal = "**  买入提醒**" if d["buy_signal"] else ""
 
-                try:
-                    info["market"] = _safe_json(f_mv.result(timeout=10))
-                    info["name"] = info["market"].get("security_name", code)
-                except Exception:
-                    info["market"] = {}
-                try:
-                    info["eval"] = _safe_json(f_ev.result(timeout=10))
-                except Exception:
-                    info["eval"] = {}
-                try:
-                    info["esg"] = _safe_json(f_esg.result(timeout=10))
-                except Exception:
-                    info["esg"] = {}
-            return code, info
+        # 投票明细
+        vote_detail = []
+        for agent_name, r2 in d["round2"].items():
+            c_flag = "  合作" if r2["cooperate"] else "  坚持"
+            vote_detail.append(
+                f"    {agent_name}{c_flag}: {r2['vote']}({r2['score']}分) — {r2['reason']}"
+            )
 
-        stock_data = {}
-        max_stocks = stock_codes[:10]
+        debate_lines.append(f"""### {name}({code}) {signal}
+- 最终得分: {d['final_score']} | 加权投票: buy {vs['buy_weight']}  hold {vs['hold_weight']}  sell {vs['sell_weight']}
+- 合作者({len(vs['cooperators'])}): {', '.join(vs['cooperators'])} | 坚持者({len(vs['defectors'])}): {', '.join(vs['defectors'])}
+- 投票明细:
+{chr(10).join(vote_detail)}""")
 
-        with ThreadPoolExecutor(max_workers=min(len(max_stocks), 5)) as pool:
-            futures = {pool.submit(_fetch_one_stock, c): c for c in max_stocks}
-            for f in as_completed(futures):
-                code, info = f.result()
-                stock_data[code] = info
+    debate_text = "\n\n".join(debate_lines)
 
-        # 获取舆情
-        try:
-            sentiment_raw = f_sentiment.result(timeout=15)
-            sentiment = json.loads(sentiment_raw) if isinstance(sentiment_raw, str) else sentiment_raw
-        except Exception:
-            sentiment = {"error": "舆情获取失败"}
+    # 买入信号股
+    buy_signals = [d for d in debates if d["buy_signal"]]
+    buy_warning = ""
+    if buy_signals:
+        buy_list = ", ".join(f"{d['stock_name']}({d['stock_code']})" for d in buy_signals)
+        buy_warning = f"""
+>   重要提醒：以下股票获 7 Agent 辩论多数 buy 票：
+> {buy_list}
+> 以上仅供参考，不构成投资建议。
+"""
 
-    # 构建 LLM 提示词
-    summary_lines = []
-    for code, info in stock_data.items():
-        mv = info.get("market", {})
-        ev = info.get("eval", {})
-        esg = info.get("esg", {})
-        summary_lines.append(
-            f"| {info['name']}({code}) "
-            f"| 收盘 {mv.get('close_price','?')} "
-            f"| 市值 {_fmt_cap(mv.get('total_market_cap','?'))} "
-            f"| ESG {esg.get('esg_rate','?')} "
-            f"| 评估: {str(ev)[:100]} |"
-        )
+    report_prompt = f"""你是一位资深投资分析师。以下是 7 位专业分析师对自选股的两轮囚徒困境辩论结果：
 
-    report_prompt = f"""你是一位资深投资分析师。以下是自选股数据和市场舆情：
+【辩论结果】
+{debate_text[:4000]}
 
-【股票数据】
-{chr(10).join(summary_lines)}
-
-【市场舆情情绪】（来源：财联社/华尔街见闻/雪球，LLM评分 -100~100）
-{json.dumps(sentiment, ensure_ascii=False, indent=2)[:2000]}
+{buy_warning}
 
 请生成一份专业的自选股分析报告，**必须包含以下所有板块**：
 
-1. **概览** — 组合整体特征（行业分布、市值规模等）
-2. **估值对比** — 各股票估值水平横向对比
-3. **ESG 表现** — ESG评级对比
-4. **舆情分析** — **必须逐只股票打分**（-100~100），结合市场整体情绪和个股关联新闻，分析舆情风险与机会
-5. **综合建议** — 基于以上全部数据给出投资建议（仅供参考，不构成投资意见）
+1. **辩论概览** — 总结 7 位分析师的分歧和共识
+2. **估值与成长** — 价值派 vs 成长派的博弈
+3. **ESG 与质量** — ESG评级和基本面质量分析
+4. **情绪与风险** — 舆情情绪+风控官的裁决
+5. **投票结论** — 各只股票 buy/hold/sell 分布和买入信号
+6. **综合建议** — 基于全部辩论数据给出投资建议（仅供参考）
 
 用 Markdown 格式输出，语言专业但不晦涩。
 

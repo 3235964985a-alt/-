@@ -258,12 +258,13 @@ if not st.session_state.messages:
         <strong> 欢迎使用金融智能助手！</strong><br>
         我可以帮你：<br>
         • 查询龙头行情大盘概览<br>
-        • 查询股票市值和机构调研信息<br>
+        • 7-Agent 囚徒困境辩论（价值/成长/质量/市场/ESG/情绪/风控）<br>
         • 进行DCF估值诊断和综合评估<br>
         • 查询ESG评级（妙盈科技/华证指数/商道融绿）<br>
         • 按ROE/ROIC/毛利率/净利率/股息率筛选优质股票<br>
+        • 上传持仓截图 → OCR识别 → 自动分析<br>
         • 回答金融投资知识问题<br><br>
-        <em> 试试输入：<code>帮我分析一下600519的估值</code> 或 <code>查询600519的ESG评级</code></em>
+        <em> 试试输入：<code>帮我分析一下600519的估值</code> 或 <code>查询600036的ESG评级</code></em>
     </div>
     """, unsafe_allow_html=True)
 
@@ -336,10 +337,13 @@ if st.session_state.get("trigger_ocr_analysis"):
         })
 
         with st.chat_message("assistant"):
-            with st.spinner(f"  正在分析 {len(codes)} 只持仓股（市值+估值+ESG）..."):
+            with st.spinner(f"  7-Agent 辩论中... 价值派vs成长派vs质量派..."):
                 try:
                     report = analyze_watchlist(codes)
-                    st.markdown('<span class="agent-badge badge-analysis">  持仓分析报告</span>', unsafe_allow_html=True)
+                    # 检测买入信号
+                    if "买入提醒" in report:
+                        st.warning("  买入信号！7 Agent 辩论多数 buy 票，详见报告")
+                    st.markdown('<span class="agent-badge badge-analysis">  持仓分析报告（含辩论）</span>', unsafe_allow_html=True)
                     st.markdown(report)
                     st.session_state.messages.append({
                         "role": "assistant",
