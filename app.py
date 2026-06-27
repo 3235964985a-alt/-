@@ -89,12 +89,12 @@ st.markdown("""
 @st.dialog("  系统说明 — 金融智能助手", width="large")
 def show_system_dialog():
     cols = st.columns(3)
-    cols[0].metric("  智能体", "5")
+    cols[0].metric("  智能体", "12")
     cols[1].metric("  MCP工具", "23")
     cols[2].metric("  数据源", "4")
 
     st.divider()
-    st.subheader("  多智能体架构")
+    st.subheader("  LangGraph 多智能体")
     st.markdown("""
     | Agent | 职能 | 工具 |
     |---|---|---|
@@ -104,6 +104,21 @@ def show_system_dialog():
     | 财经新闻 | 14+新闻源 + LLM情绪评分 | 5 |
     | 通用助手 | 金融知识问答 + RAG | 1 |
     """)
+
+    st.subheader("  7-Agent 辩论委员会")
+    st.markdown("""
+    | 分析师 | 流派 | 数据 |
+    |---|---|---|
+    | 价值派·格雷厄姆 | 价值投资 | DCF估值 |
+    | 成长派·费雪 | 成长投资 | ROE/ROIC筛选 |
+    | 质量派·芒格 | 质量投资 | GPM/NPM/股息率 |
+    | 市场派·林奇 | 市场分析 | 市值+调研 |
+    | ESG分析师 | 可持续发展 | 三机构ESG |
+    | 新闻猎手 | 舆情分析 | 14+新闻源情绪 |
+    | 风控官·塔勒布 | 风险裁决 | 纯博弈推理 |
+    """)
+
+    st.caption("博弈机制：Round 1 独立打分 → Round 2 囚徒困境（合作 1.5x 权重）→ buy > 50% 买入提醒")
 
     st.subheader("  数据源")
     st.markdown("""
@@ -128,7 +143,8 @@ def show_system_dialog():
     - 板块轮动分析（概念/行业涨跌TOP5）
     - 新闻情绪评分（三源LLM打分，-100~100）
     - 持仓截图OCR识别（EasyOCR + LLM解析）
-    - 自选股多Agent协作分析 · 流式逐字输出
+    - 7-Agent 囚徒困境辩论 · 等权投票 · 买入提醒
+    - 流式逐字输出
     """)
 
 
