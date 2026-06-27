@@ -352,14 +352,7 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
 
 **DCF估值**：{json.dumps(dcf, ensure_ascii=False)[:300] if dcf else '无数据'}
 
-**综合评估**：{json.dumps(ev, ensure_ascii=False)[:800] if ev else '无数据'}
-
-**盈利指标**：
-- ROE：{json.dumps(info.get('roe',{}), ensure_ascii=False)[:200]}
-- ROIC：{json.dumps(info.get('roic',{}), ensure_ascii=False)[:200]}
-- 毛利率：{json.dumps(info.get('gpm',{}), ensure_ascii=False)[:150]}
-- 净利率：{json.dumps(info.get('npm',{}), ensure_ascii=False)[:150]}
-- 股息率：{json.dumps(info.get('div',{}), ensure_ascii=False)[:150]}
+**综合评估**（含 ROE、ROIC、毛利率、净利率、股息率等财务指标）：{json.dumps(ev, ensure_ascii=False)[:1200] if ev else '无数据'}
 
 **ESG评级**：妙盈 {esg_m.get('esg_rate','?')} | 华证 {esg_c.get('esg_rate','?')} | 商道融绿 {esg_s.get('esg_rate','?')}"""
         data_blocks.append(block)

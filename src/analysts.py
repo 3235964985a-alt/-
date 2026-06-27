@@ -109,30 +109,46 @@ def _build_analysts() -> List[AnalystAgent]:
 # ---------- 股票类型识别 ----------
 
 def _classify_stock_type(data: Dict[str, Any]) -> str:
-    """根据 ROE 和股息率判断 growth / value / balanced"""
+    """从 stk_eval 综合评估文本中提取 ROE 和股息率，判断 growth / value / balanced
+
+    注意：stk_eval_filter_by_* 系列是全局筛选器，不支持单股查询。
+    ROE/股息率 数据从 stk_eval 的综合评估文本中解析。
+    """
+    import re
+
     roe_score = 0
     div_score = 0
 
-    roe_raw = data.get("roe", {})
-    if isinstance(roe_raw, dict):
-        roe_val = roe_raw.get("roe_1y", roe_raw.get("roe", 0)) or 0
+    # 优先尝试结构化字段（如果有其他来源），否则从 eval 文本解析
+    eval_raw = data.get("eval", {})
+    eval_text = ""
+    if isinstance(eval_raw, dict):
+        eval_text = eval_raw.get("eval", "") or eval_raw.get("text", "") or json.dumps(eval_raw, ensure_ascii=False)
+    elif isinstance(eval_raw, str):
+        eval_text = eval_raw
+
+    # 从文本中匹配 ROE 数值
+    roe_matches = re.findall(r'ROE[：:=\s]*(\d+\.?\d*)\s*%', eval_text, re.IGNORECASE)
+    if roe_matches:
         try:
-            if float(roe_val) > 20:
+            roe_val = float(roe_matches[0])
+            if roe_val > 20:
                 roe_score = 2
-            elif float(roe_val) > 10:
+            elif roe_val > 10:
                 roe_score = 1
-        except (ValueError, TypeError):
+        except ValueError:
             pass
 
-    div_raw = data.get("div", {})
-    if isinstance(div_raw, dict):
-        div_val = div_raw.get("div_rate", div_raw.get("dividend_yield", 0)) or 0
+    # 从文本中匹配股息率
+    div_matches = re.findall(r'(?:股息率|分红率|dividend)[：:=\s]*(\d+\.?\d*)\s*%', eval_text, re.IGNORECASE)
+    if div_matches:
         try:
-            if float(div_val) > 3:
+            div_val = float(div_matches[0])
+            if div_val > 3:
                 div_score = 2
-            elif float(div_val) > 1:
+            elif div_val > 1:
                 div_score = 1
-        except (ValueError, TypeError):
+        except ValueError:
             pass
 
     if roe_score >= 2 and div_score <= 1:
@@ -381,7 +397,10 @@ def _bull_bear_debate(stock_code: str, stock_name: str, data_summary: str) -> st
 # ---------- 构建数据摘要 ----------
 
 def _build_data_summary(stock_data: Dict[str, Any], sentiment: Dict[str, Any]) -> str:
-    """将股票数据 + 舆情 + 板块趋势拼接为文本摘要"""
+    """将股票数据 + 舆情 + 板块趋势拼接为文本摘要
+
+    ROE/ROIC/毛利率/净利率/股息率 全部包含在 stk_eval 的综合评估文本中。
+    """
     parts = []
     d = stock_data
 
@@ -389,19 +408,9 @@ def _build_data_summary(stock_data: Dict[str, Any], sentiment: Dict[str, Any]) -
         m = d["market"]
         parts.append(f"市值: {m.get('total_market_cap', m.get('close_price', '?'))}, 收盘: {m.get('close_price', '?')}")
     if d.get("eval"):
-        parts.append(f"综合评估: {json.dumps(d['eval'], ensure_ascii=False)[:200]}")
+        parts.append(f"综合评估（含ROE/ROIC/GPM/NPM/股息率等财务指标）: {json.dumps(d['eval'], ensure_ascii=False)[:1500]}")
     if d.get("dcf"):
-        parts.append(f"DCF估值: {json.dumps(d['dcf'], ensure_ascii=False)[:200]}")
-    if d.get("roe"):
-        parts.append(f"ROE数据: {json.dumps(d['roe'], ensure_ascii=False)[:200]}")
-    if d.get("roic"):
-        parts.append(f"ROIC数据: {json.dumps(d['roic'], ensure_ascii=False)[:200]}")
-    if d.get("gpm"):
-        parts.append(f"毛利率: {json.dumps(d['gpm'], ensure_ascii=False)[:150]}")
-    if d.get("npm"):
-        parts.append(f"净利率: {json.dumps(d['npm'], ensure_ascii=False)[:150]}")
-    if d.get("div"):
-        parts.append(f"股息率: {json.dumps(d['div'], ensure_ascii=False)[:150]}")
+        parts.append(f"DCF估值: {json.dumps(d['dcf'], ensure_ascii=False)[:300]}")
     if d.get("esg_m"):
         parts.append(f"妙盈ESG: {json.dumps(d['esg_m'], ensure_ascii=False)[:150]}")
     if d.get("esg_c"):

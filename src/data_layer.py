@@ -38,24 +38,22 @@ def fmt_cap(value) -> str:
 # ---------- 单只股票全维度数据 ----------
 
 def fetch_stock_data(code: str) -> Dict[str, Any]:
-    """并行获取一只股票的所有维度数据（12 个 MCP 工具）
+    """并行获取一只股票的所有维度数据（7 个 MCP 工具）
+
+    注意：stk_eval_filter_by_* 系列是全局筛选器，不支持单只股票查询。
+    单只股票的 ROE/ROIC/毛利率/净利率/股息率 信息包含在 stk_eval 的综合评估文本中。
 
     返回:
-        {code, name, market, eval, survey, dcf, roe, roic, gpm, npm, div, esg_m, esg_c, esg_s}
+        {code, name, market, eval, survey, dcf, esg_m, esg_c, esg_s}
     """
     data: Dict[str, Any] = {"code": code, "name": code}
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=7) as pool:
         tasks = {
             "market": pool.submit(_call_mcp_tool_sync, "stk_market_value", {"security_code": code}),
             "eval":   pool.submit(_call_mcp_tool_sync, "stk_eval", {"security_code": code}),
             "survey": pool.submit(_call_mcp_tool_sync, "stk_survey", {"security_code": code}),
             "dcf":    pool.submit(_call_mcp_tool_sync, "stk_dcf", {"security_code": code}),
-            "roe":    pool.submit(_call_mcp_tool_sync, "stk_eval_filter_by_roe_1y", {"security_code": code}),
-            "roic":   pool.submit(_call_mcp_tool_sync, "stk_eval_filter_by_roic_1y", {"security_code": code}),
-            "gpm":    pool.submit(_call_mcp_tool_sync, "stk_eval_filter_by_gpm_1y", {"security_code": code}),
-            "npm":    pool.submit(_call_mcp_tool_sync, "stk_eval_filter_by_npm_1y", {"security_code": code}),
-            "div":    pool.submit(_call_mcp_tool_sync, "stk_eval_filter_by_div_rate", {"security_code": code}),
             "esg_m":  pool.submit(_call_mcp_tool_sync, "miotech_esg_rating", {"security_code": code}),
             "esg_c":  pool.submit(_call_mcp_tool_sync, "chindices_esg_rating", {"security_code": code}),
             "esg_s":  pool.submit(_call_mcp_tool_sync, "syntaogf_esg_rating", {"security_code": code}),
