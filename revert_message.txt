@@ -1,0 +1,6 @@
+Revert commit 274b2e13e6d59ff4ace25413387f3bdd9cfae460
+
+This reverts the commit that added sentiment scoring to stock reports.
+
+Original commit message:
+feat: all stock reports now include sentiment scoring — fetches market sentiment via get_news_sentiment(), LLM scores each holding -100~100
