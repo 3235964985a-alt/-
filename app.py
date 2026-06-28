@@ -17,6 +17,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.agent import chat, chat_stream, analyze_watchlist, debate_watchlist, get_market_overview
 
 
+# ---------- 页面配置 ----------
+st.set_page_config(
+    page_title="金融智能助手",
+    page_icon="",
+    layout="centered",
+    initial_sidebar_state="expanded",
+)
+
+
 # ---------- 缓存（加速 Streamlit 热重载） ----------
 @st.cache_resource
 def _cached_graph():
@@ -29,15 +38,6 @@ def _cached_graph():
 def _cached_market_overview():
     """大盘概览缓存 5 分钟"""
     return get_market_overview()
-
-
-# ---------- 页面配置 ----------
-st.set_page_config(
-    page_title="金融智能助手",
-    page_icon="",
-    layout="centered",
-    initial_sidebar_state="expanded",
-)
 
 
 # ---------- CSS 样式 ----------

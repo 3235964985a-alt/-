@@ -42,7 +42,13 @@ def _fetch_source(source_id: str) -> Optional[Dict]:
         with httpx.Client(timeout=15, headers={"User-Agent": "Mozilla/5.0"}) as client:
             resp = client.get(f"{NEWS_API_BASE}/s", params={"id": source_id, "latest": ""})
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            # API 可能返回 list 而非 dict，标准化为 {"items": [...]}
+            if isinstance(data, list):
+                return {"items": data}
+            if not isinstance(data, dict):
+                return None
+            return data
     except Exception as e:
         logger.warning(f"NewsNow {source_id} 获取失败: {e}")
         return None
@@ -109,14 +115,26 @@ def _resolve_source(source: str) -> Optional[str]:
     return None
 
 
-def _parse_items(data: Dict) -> List[Dict]:
-    """解析新闻条目"""
+def _parse_items(data) -> List[Dict]:
+    """解析新闻条目，兼容 dict / list 两种返回"""
     items = []
-    for item in data.get("items", [])[:10]:
+    raw_items = []
+    if isinstance(data, dict):
+        raw_items = data.get("items", [])
+    elif isinstance(data, list):
+        raw_items = data
+    if not isinstance(raw_items, list):
+        return items
+    for item in raw_items[:10]:
+        if not isinstance(item, dict):
+            continue
+        extra = item.get("extra", {})
+        if not isinstance(extra, dict):
+            extra = {}
         items.append({
-            "title": item.get("title", ""),
-            "url": item.get("url", ""),
-            "info": item.get("extra", {}).get("info", ""),
+            "title": str(item.get("title", "")),
+            "url": str(item.get("url", "")),
+            "info": str(extra.get("info", "")),
         })
     return items
 
