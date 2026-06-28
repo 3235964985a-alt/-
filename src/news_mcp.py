@@ -26,10 +26,9 @@ NEWS_SOURCES = {
 
 _FINANCE_SOURCES = {"cls-hot", "xueqiu", "wallstreetcn"}  # 核心财经源，全量获取
 
-# 仅返回有实际新闻内容的源，过滤名字列表型源
+# 仅跳过无内容/非中文源
 _SKIP_SOURCES = {
-    "bilibili-hot-search", "coolapk", "douyin", "kuaishou",  # 非财经内容
-    "github-trending-today", "linuxdo-hot",  # 非中文/非财经
+    "github-trending-today", "linuxdo-hot",  # 非中文内容
 }
 
 # 雪球只返回股票代码名，取更多条才有内容

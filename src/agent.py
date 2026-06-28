@@ -236,8 +236,11 @@ def _execute_tool_calls(response, llm, system_msg, context_msgs) -> AIMessage:
     return llm.invoke(final_msgs)
 
 
-def _build_worker_context(messages: list, system_prompt: str, use_rag: bool) -> tuple:
+def _build_worker_context(messages: list, system_prompt: str, use_rag: bool, max_ctx: int = 15) -> tuple:
     """构建 worker 上下文：system_msg + filtered_messages。
+
+    Args:
+        max_ctx: 保留最近 N 条消息（finish_agent 用 30，普通 agent 用 15）
 
     Returns:
         (SystemMessage, list_of_filtered_messages)
@@ -258,7 +261,7 @@ def _build_worker_context(messages: list, system_prompt: str, use_rag: bool) -> 
     system_msg = SystemMessage(content=system_content)
 
     filtered = []
-    for msg in messages[-30:]:
+    for msg in messages[-max_ctx:]:
         if isinstance(msg, SystemMessage):
             continue
         filtered.append(msg)
@@ -271,15 +274,15 @@ def _create_worker_node(
     system_prompt: str,
     tools: List,
     use_rag: bool = False,
+    max_ctx: int = 15,
 ):
-    """创建 Worker Agent 节点。内部流程：构建上下文 → LLM 调用 → 工具执行 → 防幻觉过滤。
-    """
+    """创建 Worker Agent 节点。内部流程：构建上下文 → LLM 调用 → 工具执行 → 防幻觉过滤。"""
     llm = _create_llm(temperature=0.3)
     llm_with_tools = llm.bind_tools(tools) if tools else llm
 
     def worker_node(state: AgentState) -> Dict[str, Any]:
         messages = list(state.get("messages", []))
-        system_msg, context_msgs = _build_worker_context(messages, system_prompt, use_rag)
+        system_msg, context_msgs = _build_worker_context(messages, system_prompt, use_rag, max_ctx)
         invoke_msgs = [system_msg] + context_msgs
 
         response = llm_with_tools.invoke(invoke_msgs)
@@ -349,10 +352,10 @@ def build_graph() -> StateGraph:
         _create_worker_node("news_agent", NEWS_AGENT_PROMPT, NEWS_TOOLS, use_rag=False),
     )
 
-    # finish_agent：汇总各 Agent 输出，生成综合报告
+    # finish_agent：汇总各 Agent 输出，生成综合报告（需要更多上下文）
     workflow.add_node(
         AGENT_NODES["finish_agent"],
-        _create_worker_node("finish_agent", GENERAL_AGENT_PROMPT, [], use_rag=False),
+        _create_worker_node("finish_agent", GENERAL_AGENT_PROMPT, [], use_rag=False, max_ctx=30),
     )
 
     # 设置入口
@@ -375,12 +378,18 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # 各Worker → Supervisor（多轮协作：干完活回来，让 Supervisor 判断是否继续）
-    workflow.add_edge(AGENT_NODES["stock_agent"], AGENT_NODES["supervisor"])
-    workflow.add_edge(AGENT_NODES["analysis_agent"], AGENT_NODES["supervisor"])
-    workflow.add_edge(AGENT_NODES["esg_agent"], AGENT_NODES["supervisor"])
-    workflow.add_edge(AGENT_NODES["general_agent"], AGENT_NODES["supervisor"])
-    workflow.add_edge(AGENT_NODES["news_agent"], AGENT_NODES["supervisor"])
+    # 各Worker → Supervisor 的条件路由（链式：回 Supervisor；非链式：直接 END）
+    def route_from_worker(state: AgentState) -> Literal["supervisor", "__end__"]:
+        if state.get("analysis_chain") == "active":
+            return state.get("next_agent", "supervisor")
+        return "__end__"
+
+    for worker_name in ["stock_agent", "analysis_agent", "esg_agent", "general_agent", "news_agent"]:
+        workflow.add_conditional_edges(
+            AGENT_NODES[worker_name],
+            route_from_worker,
+            {"supervisor": AGENT_NODES["supervisor"], "__end__": END},
+        )
 
     # finish_agent 直接结束
     workflow.add_edge(AGENT_NODES["finish_agent"], END)
