@@ -80,7 +80,7 @@ def _create_llm(temperature: float = 0.3) -> ChatOpenAI:
 
 def _is_comprehensive_intent(decision: str) -> bool:
     """检测 Supervisor 决策文本中是否包含综合分析意图"""
-    keywords = ["分析", "报告", "诊断", "怎么看", "全面", "综合", "buy", "sell", "买入", "卖出"]
+    keywords = ["分析", "报告", "诊断", "怎么看", "全面", "综合", "buy", "sell", "买入", "卖出", "舆情", "新闻"]
     has_keyword = any(k in decision for k in keywords)
     # 如果 Supervisor 提到多个 agent → 综合分析
     agent_mentions = sum(1 for a in ["stock_agent", "analysis_agent", "esg_agent", "news_agent"] if a in decision)
@@ -233,13 +233,49 @@ def _create_worker_node(
             visited = list(state.get("visited_agents", []))
             if agent_name not in visited:
                 visited.append(agent_name)
-            return {"messages": [final_response], "next_agent": END, "visited_agents": visited}
+            return {"messages": [final_response], "next_agent": END, "visited_agents": visited,
+                    "analysis_chain": state.get("analysis_chain", "")}
+
+        # 有工具但没调用 → 强制重试一次（避免 LLM 跳过工具直接编造）
+        if tools and (not hasattr(response, "tool_calls") or not response.tool_calls):
+            content = response.content if hasattr(response, 'content') else ''
+            if _looks_hallucinated(content):
+                logger.warning(f"{agent_name} 跳过工具直接编造数据，强制重试")
+                retry_prompt = SystemMessage(
+                    content=system_content + "\n\n【强制指令】你刚才的回答没有调用任何工具。"
+                    "你必须立即调用工具获取实时数据。禁止使用训练知识直接回答。"
+                    "请重新开始，先调用合适的工具获取数据。"
+                )
+                retry_msgs = [retry_prompt] + filtered
+                response = llm_with_tools.invoke(retry_msgs)
+                if hasattr(response, "tool_calls") and response.tool_calls:
+                    tool_messages = []
+                    for tc in response.tool_calls:
+                        tool_name = tc.get("name", "")
+                        tool_args = tc.get("args", {})
+                        tool_id = tc.get("id", "")
+                        tool = _ALL_TOOL_MAP.get(tool_name)
+                        if tool:
+                            try:
+                                result = tool.invoke(tool_args)
+                            except Exception as e:
+                                result = f"工具调用失败: {e}"
+                        else:
+                            result = f"未知工具: {tool_name}"
+                        tool_messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
+                    final_msgs = [system_msg] + filtered + [response] + tool_messages
+                    response = llm.invoke(final_msgs)
 
         logger.info(f"{agent_name} 直接回复")
         visited = list(state.get("visited_agents", []))
         if agent_name not in visited:
             visited.append(agent_name)
-        return {"messages": [response], "next_agent": END, "visited_agents": visited}
+        # 应用防幻觉过滤器
+        raw = response.content if hasattr(response, 'content') else str(response)
+        clean = _sanitize_hallucination(raw)
+        clean_msg = AIMessage(content=clean)
+        return {"messages": [clean_msg], "next_agent": END, "visited_agents": visited,
+                "analysis_chain": state.get("analysis_chain", "")}
 
     return worker_node
 
@@ -461,6 +497,17 @@ def analyze_watchlist(stock_codes: List[str]) -> str:
     return _sanitize_hallucination(raw)
 
 
+def _looks_hallucinated(text: str) -> bool:
+    """快速判断 LLM 输出是否在编造历史数据（而非引用工具返回）"""
+    import re
+    # 编造特征：精确的历史年份 + 财务数字 + 机构名称 任意组合
+    pattern = re.compile(r'(2024\s*年(前三季度|三季度单季|上半年|年报|中报))|'
+                         r'(海通证券|景顺长城|淡水泉|信达澳亚|交银基金|睿郡基金).*调研|'
+                         r'目标均价.*\d+\.\d+\s*元|'
+                         r'机构调研.*\d+\s*家.*(海通|景顺|淡水泉)', re.IGNORECASE)
+    return bool(pattern.search(text))
+
+
 def _sanitize_hallucination(text: str) -> str:
     """后置防幻觉清理——检测 LLM 编造的历史数据（不误伤 MCP 真实数据）
 
@@ -469,12 +516,14 @@ def _sanitize_hallucination(text: str) -> str:
     import re
 
     warnings = []
-    # 只检测最明显的编造：精确的2024年年份 + 季度财报组合
-    if re.search(r'2024\s*年(前三季度|三季度单季)', text):
-        warnings.append(" 检测到'2024年前三季度'数据，此数据来自训练记忆非实时 MCP，请忽略。")
+    # 检测编造模式：精确年份 + 季度财报
+    if re.search(r'2024\s*年(前三季度|三季度单季|上半年|年报|中报)', text):
+        warnings.append(" 检测到'2024年'历史数据，此数据来自训练记忆非实时 MCP，请忽略。")
 
-    # 机构名称 + 目标均价 组合（明确的编造特征）
-    if re.search(r'(海通证券|景顺长城|淡水泉).*目标均价|目标均价.*(海通证券|景顺长城|淡水泉)', text):
+    # 机构名称 + 调研/目标均价（明确的编造特征）
+    if re.search(r'(海通证券|景顺长城|淡水泉|信达澳亚|交银基金|睿郡基金).*调研|'
+                 r'目标均价.*\d+\.?\d*\s*元|'
+                 r'机构调研.*\d+\s*家.*(海通|景顺|淡水泉)', text):
         warnings.append(" 检测到编造的机构调研/目标价数据，非 MCP 实时返回。")
 
     if warnings:
