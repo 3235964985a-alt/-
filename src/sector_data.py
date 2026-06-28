@@ -6,8 +6,6 @@ import logging
 import json
 from typing import Any, Dict, List, Optional
 
-import akshare as ak
-
 logger = logging.getLogger(__name__)
 
 
@@ -17,6 +15,8 @@ def get_concept_sectors(top_n: int = 10) -> List[Dict]:
     Returns:
         [{"name": "半导体", "change_pct": 3.2, "leading_stock": "中芯国际", ...}, ...]
     """
+    import akshare as ak
+    import pandas as pd
     try:
         df = ak.stock_board_concept_name_em()
         if df is None or len(df) == 0:
@@ -51,6 +51,8 @@ def get_industry_sectors(top_n: int = 10) -> List[Dict]:
     Returns:
         [{"name": "半导体", "change_pct": 3.2, ...}, ...]
     """
+    import akshare as ak
+    import pandas as pd
     try:
         df = ak.stock_board_industry_name_em()
         if df is None or len(df) == 0:

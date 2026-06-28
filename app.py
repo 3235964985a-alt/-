@@ -17,6 +17,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.agent import chat, chat_stream, analyze_watchlist, debate_watchlist, get_market_overview
 
 
+# ---------- 缓存（加速 Streamlit 热重载） ----------
+@st.cache_resource
+def _cached_graph():
+    """LangGraph 图只编译一次"""
+    from src.agent import get_graph
+    return get_graph()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_market_overview():
+    """大盘概览缓存 5 分钟"""
+    return get_market_overview()
+
+
 # ---------- 页面配置 ----------
 st.set_page_config(
     page_title="金融智能助手",
@@ -105,21 +119,18 @@ def show_system_dialog():
     | 通用助手 | 金融知识问答 + RAG | 1 |
     """)
 
-    st.subheader("  8-Agent 辩论委员会（借鉴 TradingAgents）")
+    st.subheader("  5-Agent 辩论委员会")
     st.markdown("""
     | 分析师 | 流派 | 数据 |
     |---|---|---|
     | 价值派·格雷厄姆 | 价值投资 | DCF估值 |
     | 成长派·费雪 | 成长投资 | ROE/ROIC筛选 |
     | 质量派·芒格 | 质量投资 | GPM/NPM/股息率 |
-    | 市场派·林奇 | 市场分析 | 市值+调研 |
     | ESG分析师 | 可持续发展 | 三机构ESG |
-    | 新闻猎手 | 舆情分析 | 14+新闻源情绪 |
-    | 风控官·塔勒布 | 风险裁决 | 纯博弈推理 |
-    | 技术派·欧奈尔 | 趋势分析 | 概念/行业板块轮动 |
+    | 风控官·塔勒布 | 风险裁决 | 独立博弈推理 |
     """)
 
-    st.caption("博弈机制：Round 0 Bull/Bear 对抗辩论 → Round 1 独立打分 → Round 2 囚徒困境（合作 1.5x 权重）→ 成长/价值股动态角色权重 → buy > 50% 买入提醒")
+    st.caption("辩论机制：Bull/Bear 对抗辩论 → 5 Agent 独立打分 → 成长/价值股动态角色权重 → buy > 50% 买入提醒")
 
     st.subheader("  数据源")
     st.markdown("""
@@ -275,7 +286,7 @@ if not st.session_state.messages:
         <strong> 欢迎使用金融智能助手！</strong><br>
         我可以帮你：<br>
         • 查询龙头行情大盘概览<br>
-        • 7-Agent 囚徒困境辩论（价值/成长/质量/市场/ESG/情绪/风控）<br>
+        • 5-Agent 辩论投票（价值/成长/质量/ESG/风控）<br>
         • 进行DCF估值诊断和综合评估<br>
         • 查询ESG评级（妙盈科技/华证指数/商道融绿）<br>
         • 按ROE/ROIC/毛利率/净利率/股息率筛选优质股票<br>
@@ -374,7 +385,7 @@ if st.session_state.get("trigger_ocr_analysis"):
                         "agent": "error",
                     })
 
-        # Step 2：询问是否需要买卖建议（8-Agent 辩论投票）
+        # Step 2：询问是否需要买卖建议（5-Agent 辩论投票）
         st.session_state["pending_debate_codes"] = codes
         st.session_state["show_debate_prompt"] = True
 
@@ -383,14 +394,14 @@ if st.session_state.get("show_debate_prompt") and st.session_state.get("pending_
     codes = st.session_state["pending_debate_codes"]
     col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("  生成买卖建议（8-Agent 辩论投票）", type="primary", use_container_width=True):
+        if st.button("  生成买卖建议（5-Agent 辩论投票）", type="primary", use_container_width=True):
             st.session_state["show_debate_prompt"] = False
-            with st.spinner("  Bull/Bear 对抗辩论 + 8 Agent 囚徒困境投票..."):
+            with st.spinner("  Bull/Bear 对抗辩论 + 5 Agent 投票..."):
                 try:
                     debate_report = debate_watchlist(codes)
                     # 检测买入信号
                     if "买入提醒" in debate_report:
-                        st.warning("  买入信号！8 Agent 辩论多数 buy 票，详见报告")
+                        st.warning("  买入信号！5 Agent 辩论多数 buy 票，详见报告")
                     st.markdown('<span class="agent-badge badge-esg">  辩论投票报告</span>', unsafe_allow_html=True)
                     st.markdown(debate_report)
                     st.session_state.messages.append({
@@ -417,7 +428,7 @@ if st.session_state.get("trigger_market_overview"):
     with st.chat_message("assistant"):
         with st.spinner("  查询核心龙头行情..."):
             try:
-                overview = get_market_overview()
+                overview = _cached_market_overview()
                 st.markdown('<span class="agent-badge badge-stock">  大盘概览</span>', unsafe_allow_html=True)
                 st.markdown(overview)
                 st.session_state.messages.append({
@@ -519,11 +530,11 @@ if user_input:
                     elif chunk["type"] == "debate_signal":
                         debate_text = chunk.get("text", "")
                         if "买入提醒" in debate_text:
-                            st.warning("  买入信号！8 Agent 辩论多数 buy 票")
-                        st.markdown('<span class="agent-badge badge-esg">  8-Agent 辩论投票</span>', unsafe_allow_html=True)
+                            st.warning("  买入信号！5 Agent 辩论多数 buy 票")
+                        st.markdown('<span class="agent-badge badge-esg">  5-Agent 辩论投票</span>', unsafe_allow_html=True)
                         st.markdown(debate_text)
                         if response_text:
-                            response_text += f"\n\n---\n\n##  8-Agent 辩论投票\n\n{debate_text}"
+                            response_text += f"\n\n---\n\n##  5-Agent 辩论投票\n\n{debate_text}"
                         st.session_state.messages.append({
                             "role": "assistant",
                             "content": f"【辩论投票】\n{debate_text}",
