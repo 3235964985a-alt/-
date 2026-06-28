@@ -34,6 +34,7 @@ from .prompts import (
     ESG_AGENT_PROMPT,
     GENERAL_AGENT_PROMPT,
     NEWS_AGENT_PROMPT,
+    FINISH_AGENT_PROMPT,
 )
 from .rag import retrieve_knowledge_as_context
 
@@ -371,7 +372,7 @@ def build_graph() -> StateGraph:
     # finish_agent：汇总各 Agent 输出，生成综合报告（需要更多上下文）
     workflow.add_node(
         AGENT_NODES["finish_agent"],
-        _create_worker_node("finish_agent", GENERAL_AGENT_PROMPT, [], use_rag=False, max_ctx=30),
+        _create_worker_node("finish_agent", FINISH_AGENT_PROMPT, [], use_rag=False, max_ctx=30),
     )
 
     # 设置入口
