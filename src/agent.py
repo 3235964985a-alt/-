@@ -87,6 +87,47 @@ def _is_comprehensive_intent(decision: str) -> bool:
     return has_keyword or agent_mentions >= 2
 
 
+# ---------- 关键词预路由（LLM调用前先判断，节省路由时间 + 避免误路由）----------
+
+# 新闻源名称 → 直接路由到 news_agent
+_NEWS_SOURCE_KEYWORDS = [
+    "b站", "微博", "知乎", "抖音", "头条", "今日头条", "雪球", "财联社",
+    "华尔街见闻", "贴吧", "澎湃", "酷安", "快手", "github趋势", "github热榜",
+]
+
+# 股票6位代码 → 需要 stock_agent
+_STOCK_CODE_PATTERN = __import__('re').compile(r'(?<!\d)(00[01236]\d{3}|3[0o]0\d{3}|60[0123]\d{3}|68[089]\d{3})(?!\d)')
+
+
+def _keyword_route(user_text: str) -> str:
+    """关键词预路由：返回 agent_name 或 '' 表示需要 LLM 判断"""
+    t = user_text.lower()
+
+    # 新闻源名称 → news_agent（"b站有什么新闻"、"雪球热搜"等）
+    for kw in _NEWS_SOURCE_KEYWORDS:
+        if kw in t:
+            return "news_agent"
+
+    # 新闻/舆情关键词
+    if any(k in t for k in ["新闻", "舆情", "热搜", "头条", "热点", "资讯", "消息"]):
+        return "news_agent"
+
+    # 股票代码 → stock_agent
+    if _STOCK_CODE_PATTERN.search(user_text):
+        return "stock_agent"
+
+    # ESG
+    if any(k in t for k in ["esg", "评级", "可持续发展"]):
+        return "esg_agent"
+
+    # 筛选
+    filter_kw = ["筛选", "roe", "roic", "毛利率", "净利率", "股息率"]
+    if any(k in t for k in filter_kw):
+        return "analysis_agent"
+
+    return ""  # 需要 LLM 判断
+
+
 # ---------- Supervisor ----------
 
 def create_supervisor_node():
@@ -107,11 +148,24 @@ def create_supervisor_node():
                 if next_agent not in visited:
                     logger.info(f"综合分析链 → {next_agent}")
                     return {"next_agent": next_agent, "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": "active"}
-            # 所有Agent都跑完了
             logger.info("综合分析链完成 → finish_agent")
             return {"next_agent": "finish_agent", "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": ""}
 
-        # 构造路由决策消息——保留最近20条让 Supervisor 有足够上下文
+        # 提取用户最新问题
+        user_text = ""
+        for m in reversed(messages):
+            if isinstance(m, HumanMessage):
+                user_text = (m.content or "").lower()
+                break
+
+        # 关键词预路由（第1轮，无 visited 时优先使用，省 LLM 调用）
+        if round_count == 0 and not visited:
+            pre_route = _keyword_route(user_text)
+            if pre_route:
+                logger.info(f"Supervisor 关键词预路由 → {pre_route}")
+                return {"next_agent": pre_route, "round_count": 1, "visited_agents": visited, "analysis_chain": ""}
+
+        # 构造路由决策消息
         system_msg = SystemMessage(content=SUPERVISOR_PROMPT)
         recent = messages[-20:] if len(messages) > 20 else messages
         decision_msgs = [system_msg] + recent
@@ -124,24 +178,20 @@ def create_supervisor_node():
             logger.info(f"Supervisor 达到最大轮次 → finish_agent")
             return {"next_agent": "finish_agent", "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": ""}
 
-        # 第1轮之后，Supervisor 可以决定 FINISH
         if round_count >= 1:
             if "finish" in decision or "summary" in decision or "总结" in decision:
                 logger.info(f"Supervisor 决定汇总 → finish_agent")
                 return {"next_agent": "finish_agent", "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": ""}
 
-        # 检测综合分析意图 → 启动分析链
         if _is_comprehensive_intent(decision):
             logger.info(f"Supervisor 检测到综合分析意图 → 启动分析链 stock_agent")
             return {"next_agent": "stock_agent", "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": "active"}
 
-        # 解析并规范化决策
         for agent_name in ["stock_agent", "analysis_agent", "esg_agent", "news_agent", "general_agent"]:
             if agent_name in decision:
                 logger.info(f"Supervisor路由 → {agent_name}")
                 return {"next_agent": agent_name, "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": ""}
 
-        # 默认走通用Agent
         logger.info(f"Supervisor路由 → general_agent (fallback, decision={decision})")
         return {"next_agent": "general_agent", "round_count": round_count + 1, "visited_agents": visited, "analysis_chain": ""}
 
@@ -150,132 +200,122 @@ def create_supervisor_node():
 
 # ---------- Worker Agent 工厂 ----------
 
+def _execute_tool_calls(response, llm, system_msg, context_msgs) -> AIMessage:
+    """统一执行 LLM 返回的工具调用，返回工具结果后的 LLM 最终回复。
+
+    若 tool_calls 为空或不含任何已知工具，返回原始 response。
+    所有异常被捕获并转为 ToolMessage 错误内容，确保流程不断。
+    """
+    if not hasattr(response, "tool_calls") or not response.tool_calls:
+        return response
+
+    tool_messages = []
+    for tc in response.tool_calls:
+        tool_name = tc.get("name", "")
+        tool_args = tc.get("args", {})
+        tool_id = tc.get("id", "")
+
+        tool = _ALL_TOOL_MAP.get(tool_name)
+        if tool:
+            try:
+                result = str(tool.invoke(tool_args))
+                logger.info(f"工具调用: {tool_name}({tool_args}) → 成功")
+            except Exception as e:
+                result = f"工具 {tool_name} 执行失败: {e}"
+                logger.error(f"工具调用失败: {tool_name}, 错误: {e}")
+        else:
+            result = f"未知工具: {tool_name}"
+            logger.warning(f"未知工具调用: {tool_name}")
+
+        tool_messages.append(ToolMessage(content=result, tool_call_id=tool_id))
+
+    if not tool_messages:
+        return response
+
+    final_msgs = [system_msg] + context_msgs + [response] + tool_messages
+    return llm.invoke(final_msgs)
+
+
+def _build_worker_context(messages: list, system_prompt: str, use_rag: bool) -> tuple:
+    """构建 worker 上下文：system_msg + filtered_messages。
+
+    Returns:
+        (SystemMessage, list_of_filtered_messages)
+    """
+    system_content = system_prompt
+
+    if use_rag:
+        user_query = ""
+        for m in reversed(messages):
+            if isinstance(m, HumanMessage):
+                user_query = m.content
+                break
+        if user_query:
+            rag_context = retrieve_knowledge_as_context(user_query, k=3)
+            if rag_context:
+                system_content += f"\n\n【知识库参考资料】\n{rag_context}"
+
+    system_msg = SystemMessage(content=system_content)
+
+    filtered = []
+    for msg in messages[-30:]:
+        if isinstance(msg, SystemMessage):
+            continue
+        filtered.append(msg)
+
+    return system_msg, filtered
+
+
 def _create_worker_node(
     agent_name: str,
     system_prompt: str,
     tools: List,
     use_rag: bool = False,
 ):
-    """创建Worker Agent节点
-
-    Args:
-        agent_name: Agent名称标识
-        system_prompt: 系统提示词
-        tools: 该Agent可用的工具列表
-        use_rag: 是否启用RAG知识检索
+    """创建 Worker Agent 节点。内部流程：构建上下文 → LLM 调用 → 工具执行 → 防幻觉过滤。
     """
-
     llm = _create_llm(temperature=0.3)
-    if tools:
-        llm_with_tools = llm.bind_tools(tools)
-    else:
-        llm_with_tools = llm
+    llm_with_tools = llm.bind_tools(tools) if tools else llm
 
     def worker_node(state: AgentState) -> Dict[str, Any]:
         messages = list(state.get("messages", []))
-
-        # 构建上下文：系统提示 + 可选RAG + 历史消息
-        system_content = system_prompt
-
-        if use_rag:
-            # 提取用户问题用于RAG检索
-            user_query = ""
-            for msg in reversed(messages):
-                if isinstance(msg, HumanMessage):
-                    user_query = msg.content
-                    break
-
-            if user_query:
-                rag_context = retrieve_knowledge_as_context(user_query, k=3)
-                if rag_context:
-                    system_content += f"\n\n【知识库参考资料】\n{rag_context}"
-
-        system_msg = SystemMessage(content=system_content)
-
-        # 保留最近30条（含工具消息），确保多轮对话上下文完整
-        filtered = []
-        for msg in messages[-30:]:
-            if isinstance(msg, SystemMessage):
-                continue
-            filtered.append(msg)
-
-        invoke_msgs = [system_msg] + filtered
+        system_msg, context_msgs = _build_worker_context(messages, system_prompt, use_rag)
+        invoke_msgs = [system_msg] + context_msgs
 
         response = llm_with_tools.invoke(invoke_msgs)
 
-        # 如果有工具调用，执行工具
-        if hasattr(response, "tool_calls") and response.tool_calls:
-            tool_messages = []
-            for tc in response.tool_calls:
-                tool_name = tc.get("name", "")
-                tool_args = tc.get("args", {})
-                tool_id = tc.get("id", "")
+        # 工具执行（含 LLM 二次回复）
+        response = _execute_tool_calls(response, llm, system_msg, context_msgs)
 
-                tool = _ALL_TOOL_MAP.get(tool_name)
-                if tool:
-                    try:
-                        result = tool.invoke(tool_args)
-                        logger.info(f"工具调用: {tool_name}({tool_args}) → 成功")
-                    except Exception as e:
-                        result = f"工具调用失败: {e}"
-                        logger.error(f"工具调用失败: {tool_name}, 错误: {e}")
-                else:
-                    result = f"未知工具: {tool_name}"
-
-                tool_messages.append(
-                    ToolMessage(content=str(result), tool_call_id=tool_id)
-                )
-
-            # 用工具结果再次调用LLM生成最终回复
-            final_msgs = [system_msg] + filtered + [response] + tool_messages
-            final_response = llm.invoke(final_msgs)
-            logger.info(f"{agent_name} 生成回复 ({'含' if tool_messages else '无'}工具调用)")
-            visited = list(state.get("visited_agents", []))
-            if agent_name not in visited:
-                visited.append(agent_name)
-            return {"messages": [final_response], "next_agent": END, "visited_agents": visited,
-                    "analysis_chain": state.get("analysis_chain", "")}
-
-        # 有工具但没调用 → 强制重试一次（避免 LLM 跳过工具直接编造）
+        # 有工具但未调用且检测到编造 → 强制重试
         if tools and (not hasattr(response, "tool_calls") or not response.tool_calls):
             content = response.content if hasattr(response, 'content') else ''
             if _looks_hallucinated(content):
-                logger.warning(f"{agent_name} 跳过工具直接编造数据，强制重试")
-                retry_prompt = SystemMessage(
-                    content=system_content + "\n\n【强制指令】你刚才的回答没有调用任何工具。"
-                    "你必须立即调用工具获取实时数据。禁止使用训练知识直接回答。"
-                    "请重新开始，先调用合适的工具获取数据。"
+                logger.warning(f"{agent_name} 跳过工具直接编造，强制重试")
+                retry_msg = SystemMessage(
+                    content=system_prompt + "\n\n【强制指令】必须调用工具获取数据，禁止直接回答。请重新开始。"
                 )
-                retry_msgs = [retry_prompt] + filtered
-                response = llm_with_tools.invoke(retry_msgs)
-                if hasattr(response, "tool_calls") and response.tool_calls:
-                    tool_messages = []
-                    for tc in response.tool_calls:
-                        tool_name = tc.get("name", "")
-                        tool_args = tc.get("args", {})
-                        tool_id = tc.get("id", "")
-                        tool = _ALL_TOOL_MAP.get(tool_name)
-                        if tool:
-                            try:
-                                result = tool.invoke(tool_args)
-                            except Exception as e:
-                                result = f"工具调用失败: {e}"
-                        else:
-                            result = f"未知工具: {tool_name}"
-                        tool_messages.append(ToolMessage(content=str(result), tool_call_id=tool_id))
-                    final_msgs = [system_msg] + filtered + [response] + tool_messages
-                    response = llm.invoke(final_msgs)
+                retry_msgs = [retry_msg] + context_msgs
+                retry_response = llm_with_tools.invoke(retry_msgs)
+                retry_response = _execute_tool_calls(retry_response, llm, retry_msg, context_msgs)
+                response = retry_response
 
-        logger.info(f"{agent_name} 直接回复")
-        visited = list(state.get("visited_agents", []))
-        if agent_name not in visited:
-            visited.append(agent_name)
-        # 应用防幻觉过滤器
         raw = response.content if hasattr(response, 'content') else str(response)
         clean = _sanitize_hallucination(raw)
         clean_msg = AIMessage(content=clean)
-        return {"messages": [clean_msg], "next_agent": END, "visited_agents": visited,
-                "analysis_chain": state.get("analysis_chain", "")}
+
+        logger.info(f"{agent_name} 回复")
+
+        visited = list(state.get("visited_agents", []))
+        if agent_name not in visited:
+            visited.append(agent_name)
+
+        return {
+            "messages": [clean_msg],
+            "next_agent": END,
+            "visited_agents": visited,
+            "analysis_chain": state.get("analysis_chain", ""),
+        }
 
     return worker_node
 
