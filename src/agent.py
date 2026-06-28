@@ -99,33 +99,49 @@ _NEWS_SOURCE_KEYWORDS = [
 _STOCK_CODE_PATTERN = __import__('re').compile(r'(?<!\d)(00[01236]\d{3}|3[0o]0\d{3}|60[0123]\d{3}|68[089]\d{3})(?!\d)')
 
 
-def _keyword_route(user_text: str) -> str:
-    """关键词预路由：返回 agent_name 或 '' 表示需要 LLM 判断"""
-    t = user_text.lower()
+def _keyword_route(user_text: str) -> tuple:
+    """关键词预路由：返回 (agent_name, analysis_chain) 或 ("", "") 表示需 LLM 判断
 
-    # 新闻源名称 → news_agent（"b站有什么新闻"、"雪球热搜"等）
+    analysis_chain="active" 触发 stock→analysis→esg→news 全链协作。
+    含股票6位代码自动启动全链，除非用户明确只要某一部分（如"只查股价"）。
+    """
+    t = user_text.lower()
+    has_code = bool(_STOCK_CODE_PATTERN.search(user_text))
+
+    # 用户明确只要单一部分 → 不启动链
+    if "只查" in t or "只看" in t or "只需要" in t or "仅查" in t:
+        if "股价" in t or "价格" in t or "市值" in t:
+            return ("stock_agent", "")
+        if "esg" in t or "评级" in t:
+            return ("esg_agent", "")
+        if "新闻" in t or "舆情" in t:
+            return ("news_agent", "")
+        if "估值" in t or "dcf" in t or "筛选" in t:
+            return ("analysis_agent", "")
+
+    # 新闻源名称 → news_agent
     for kw in _NEWS_SOURCE_KEYWORDS:
         if kw in t:
-            return "news_agent"
+            return ("news_agent", "")
 
-    # 新闻/舆情关键词
+    # 新闻/舆情关键词（无股票代码时）
     if any(k in t for k in ["新闻", "舆情", "热搜", "头条", "热点", "资讯", "消息"]):
-        return "news_agent"
+        return ("news_agent", "")
 
-    # 股票代码 → stock_agent
-    if _STOCK_CODE_PATTERN.search(user_text):
-        return "stock_agent"
+    # 股票代码 → 启动全部分析链
+    if has_code:
+        return ("stock_agent", "active")
 
     # ESG
     if any(k in t for k in ["esg", "评级", "可持续发展"]):
-        return "esg_agent"
+        return ("esg_agent", "")
 
     # 筛选
     filter_kw = ["筛选", "roe", "roic", "毛利率", "净利率", "股息率"]
     if any(k in t for k in filter_kw):
-        return "analysis_agent"
+        return ("analysis_agent", "")
 
-    return ""  # 需要 LLM 判断
+    return ("", "")  # 需要 LLM 判断
 
 
 # ---------- Supervisor ----------
@@ -160,10 +176,10 @@ def create_supervisor_node():
 
         # 关键词预路由（第1轮，无 visited 时优先使用，省 LLM 调用）
         if round_count == 0 and not visited:
-            pre_route = _keyword_route(user_text)
+            pre_route, chain_flag = _keyword_route(user_text)
             if pre_route:
-                logger.info(f"Supervisor 关键词预路由 → {pre_route}")
-                return {"next_agent": pre_route, "round_count": 1, "visited_agents": visited, "analysis_chain": ""}
+                logger.info(f"Supervisor 关键词预路由 → {pre_route} (chain={chain_flag or 'off'})")
+                return {"next_agent": pre_route, "round_count": 1, "visited_agents": visited, "analysis_chain": chain_flag}
 
         # 构造路由决策消息
         system_msg = SystemMessage(content=SUPERVISOR_PROMPT)
