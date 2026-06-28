@@ -43,6 +43,154 @@ _ALL_TOOL_MAP = {**TOOL_MAP, **NEWS_TOOL_MAP}
 
 logger = logging.getLogger(__name__)
 
+# ---------- 股票代码提取 ----------
+
+def _extract_single_code(text: str) -> str:
+    """从文本中提取第一个6位股票代码"""
+    import re
+    m = re.search(r'(?<!\d)(00[01236]\d{3}|3[0o]0\d{3}|60[0123]\d{3}|68[089]\d{3})(?!\d)', text)
+    return m.group(0) if m else ""
+
+
+# ---------- Pre-fetch 数据层（先取数据再给LLM总结，不再依赖LLM调工具） ----------
+
+def _prefetch_stock_agent(user_text: str) -> str:
+    """为 stock_agent 预取数据：akshare（本地） + MCP 行情/调研（best-effort）"""
+    code = _extract_single_code(user_text)
+    parts = []
+
+    if code:
+        # akshare 本地数据（不依赖 MCP Server）
+        try:
+            from .akshare_data import fetch_stock_akshare
+            ak = fetch_stock_akshare(code)
+            info = ak.get("stock_info", {})
+            if info.get("company_name"):
+                parts.append(f"【股票信息】名称: {info['company_name']} | 行业: {info.get('industry','')} | 上市: {info.get('listing_date','')} | 总股本: {info.get('total_shares','')}")
+            fin = ak.get("financials", {}).get("latest", {})
+            if fin:
+                parts.append(f"【最新财务指标】ROE: {fin.get('roe','?')}% | 毛利率: {fin.get('gpm','?')}% | 净利率: {fin.get('npm','?')}% | 负债率: {fin.get('debt_ratio','?')}% | 营收增长: {fin.get('revenue_growth','?')}%")
+            val = ak.get("valuation", {})
+            if val:
+                parts.append(f"【估值】PE: {val.get('pe','?')} | PB: {val.get('pb','?')} | 市值: {val.get('market_cap','?')}")
+            abs_ = ak.get("abstract", {})
+            if abs_:
+                parts.append(f"【最新财报】营收: {abs_.get('revenue','?')} | 净利润: {abs_.get('net_profit','?')} | EPS: {abs_.get('eps','?')}")
+        except Exception as e:
+            parts.append(f" AKShare 数据获取失败: {e}")
+
+    # MCP 实时行情 + 调研（best-effort，有就用）
+    try:
+        market_val = _call_mcp_tool_sync("stk_market_value", {"security_code": code})
+        if market_val and "错误" not in str(market_val) and "Error" not in str(market_val):
+            parts.append(f"【实时行情】{str(market_val)[:800]}")
+    except Exception:
+        pass
+    try:
+        survey_val = _call_mcp_tool_sync("stk_survey", {"security_code": code})
+        if survey_val and "错误" not in str(survey_val) and "Error" not in str(survey_val):
+            parts.append(f"【机构调研】{str(survey_val)[:600]}")
+    except Exception:
+        pass
+
+    # 大盘概览（用户问大盘/行情时）
+    if any(k in user_text for k in ["大盘", "行情", "市场", "指数", "盘面"]):
+        try:
+            parts.append(f"【大盘概览】\n{get_market_overview()[:500]}")
+        except Exception:
+            pass
+
+    # 板块（用户问板块时）
+    if any(k in user_text for k in ["板块", "概念", "行业", "热点"]):
+        try:
+            parts.append(f"【板块行情】\n{get_sector_overview_text()[:500]}")
+        except Exception:
+            pass
+
+    return "\n\n".join(parts)
+
+
+def _prefetch_analysis_agent(user_text: str) -> str:
+    """为 analysis_agent 预取数据：akshare 财务指标 + MCP DCF/eval（best-effort）"""
+    code = _extract_single_code(user_text)
+    parts = []
+
+    if code:
+        try:
+            from .akshare_data import fetch_stock_akshare
+            ak = fetch_stock_akshare(code)
+            fin = ak.get("financials", {})
+            for q in fin.get("recent_quarters", []):
+                parts.append(f"财务指标({q.get('date','')}): ROE={q.get('roe','?')}% | ROA={q.get('roa','?')}% | 毛利率={q.get('gpm','?')}% | 净利率={q.get('npm','?')}% | 净利增长={q.get('profit_growth','?')}% | 负债率={q.get('debt_ratio','?')}%")
+        except Exception as e:
+            parts.append(f" AKShare 财务数据失败: {e}")
+
+    # MCP DCF + eval（best-effort）
+    if code:
+        for tool_name in ["stk_dcf", "stk_eval"]:
+            try:
+                val = _call_mcp_tool_sync(tool_name, {"security_code": code})
+                if val and "错误" not in str(val):
+                    label = "DCF估值" if "dcf" in tool_name else "综合评估"
+                    parts.append(f"【{label}】{str(val)[:800]}")
+            except Exception:
+                pass
+
+    # 筛选类（无股票代码，直接调 MCP）
+    filter_kw = ["roe", "roic", "毛利率", "净利率", "股息率", "筛选"]
+    if any(k in user_text for k in filter_kw) and not code:
+        # 尝试 MCP 筛选器
+        filter_map = {
+            "roe_1y": "stk_eval_filter_by_roe_1y",
+            "roe_3y": "stk_eval_filter_by_roe_3y",
+            "roic_1y": "stk_eval_filter_by_roic_1y",
+            "roic_3y": "stk_eval_filter_by_roic_3y",
+            "gpm_1y": "stk_eval_filter_by_gpm_1y",
+            "gpm_3y": "stk_eval_filter_by_gpm_3y",
+            "npm_1y": "stk_eval_filter_by_npm_1y",
+            "npm_3y": "stk_eval_filter_by_npm_3y",
+            "div_rate": "stk_eval_filter_by_div_rate",
+        }
+        for kw, tool_name in filter_map.items():
+            if kw in user_text:
+                try:
+                    val = _call_mcp_tool_sync(tool_name, {})
+                    if val and "错误" not in str(val):
+                        parts.append(f"【筛选结果】{str(val)[:800]}")
+                except Exception:
+                    pass
+
+    return "\n\n".join(parts) if parts else ""
+
+
+def _prefetch_esg_agent(user_text: str) -> str:
+    """为 esg_agent 预取数据：MCP ESG 评级（纯 MCP，无 akshare 替代）"""
+    code = _extract_single_code(user_text)
+    if not code:
+        return ""
+
+    parts = []
+    esg_tools = {
+        "miotech_esg_rating": "妙盈科技",
+        "chindices_esg_rating": "华证指数",
+        "syntaogf_esg_rating": "商道融绿",
+    }
+    for tool_name, label in esg_tools.items():
+        try:
+            val = _call_mcp_tool_sync(tool_name, {"security_code": code})
+            if val and "错误" not in str(val) and "Error" not in str(val):
+                parts.append(f"【{label}ESG评级】{str(val)[:600]}")
+            else:
+                parts.append(f"【{label}ESG评级】数据暂未获取")
+        except Exception:
+            parts.append(f"【{label}ESG评级】MCP 不可用")
+
+    return "\n\n".join(parts) if parts else "ESG 数据源暂不可用"
+
+
+# Import _call_mcp_tool_sync for pre-fetch
+from .mcp_tools import _call_mcp_tool_sync
+
 # ---------- Agent节点标识 ----------
 AGENT_NODES = {
     "supervisor": "supervisor",
@@ -292,55 +440,77 @@ def _create_worker_node(
     tools: List,
     use_rag: bool = False,
     max_ctx: int = 15,
+    prefetch_fn = None,
 ):
-    """创建 Worker Agent 节点。内部流程：构建上下文 → LLM 调用 → 工具执行 → 防幻觉过滤。"""
+    """创建 Worker Agent 节点。
+
+    prefetch_fn: 如果提供，则采用"先取数据→LLM总结"模式，不再走 bind_tools。
+                 函数签名: fn(user_text: str) -> str
+    """
     llm = _create_llm(temperature=0.3)
-    llm_with_tools = llm.bind_tools(tools) if tools else llm
+    llm_with_tools = llm.bind_tools(tools) if tools and not prefetch_fn else llm
 
     def worker_node(state: AgentState) -> Dict[str, Any]:
         messages = list(state.get("messages", []))
         system_msg, context_msgs = _build_worker_context(messages, system_prompt, use_rag, max_ctx)
-        invoke_msgs = [system_msg] + context_msgs
 
-        response = llm_with_tools.invoke(invoke_msgs)
-
-        # 工具执行（含 LLM 二次回复）
-        response = _execute_tool_calls(response, llm, system_msg, context_msgs)
-
-        # 有工具但未调用且检测到编造 → 强制重试一次
-        if tools and (not hasattr(response, "tool_calls") or not response.tool_calls):
-            content = response.content if hasattr(response, 'content') else ''
-            if _looks_hallucinated(content):
-                logger.warning(f"{agent_name} 跳过工具直接编造，强制重试")
-                retry_msg = SystemMessage(
-                    content=system_prompt + "\n\n【强制指令】必须调用工具获取数据，禁止直接回答。请重新开始。"
+        # --- Pre-fetch 模式：代码先取数据，注入 prompt，LLM 只总结 ---
+        if prefetch_fn:
+            user_text = ""
+            for m in reversed(messages):
+                if isinstance(m, HumanMessage):
+                    user_text = (m.content or "")
+                    break
+            fetched = prefetch_fn(user_text) if user_text else ""
+            if fetched:
+                system_content = system_msg.content + (
+                    f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"【系统已获取的实时数据 — 仅使用以下数据回答，禁止编造】\n"
+                    f"{fetched}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"基于以上数据给出分析。数据未覆盖的部分写'数据暂未获取'。"
                 )
-                retry_msgs = [retry_msg] + context_msgs
-                retry_response = llm_with_tools.invoke(retry_msgs)
-                retry_response = _execute_tool_calls(retry_response, llm, retry_msg, context_msgs)
-                # 重试后仍然没调工具且还在编造 → 直接拒绝输出
-                if (not hasattr(retry_response, "tool_calls") or not retry_response.tool_calls):
-                    retry_content = retry_response.content if hasattr(retry_response, 'content') else ''
-                    if _looks_hallucinated(retry_content):
-                        logger.error(f"{agent_name} 重试后仍编造，强杀输出")
-                        visited = list(state.get("visited_agents", []))
-                        if agent_name not in visited:
-                            visited.append(agent_name)
-                        next_node = "supervisor" if state.get("analysis_chain") == "active" else END
-                        return {
-                            "messages": [AIMessage(content=(
-                                ">   **数据获取失败** — MCP 工具重试后仍不可用，Agent 无法获取实时数据。\n"
-                                "> 请检查后端 MCP 服务是否正常，或稍后重试。"
-                            ))],
-                            "next_agent": next_node,
-                            "visited_agents": visited,
-                            "analysis_chain": state.get("analysis_chain", ""),
-                        }
-                response = retry_response
+                system_msg = SystemMessage(content=system_content)
+            response = llm.invoke([system_msg] + context_msgs)
+            raw = response.content if hasattr(response, 'content') else str(response)
+            clean_msg = AIMessage(content=raw)
+        else:
+            # --- 工具调用模式（仅 news_agent / general_agent） ---
+            response = llm_with_tools.invoke([system_msg] + context_msgs)
+            response = _execute_tool_calls(response, llm, system_msg, context_msgs)
 
-        raw = response.content if hasattr(response, 'content') else str(response)
-        clean = _sanitize_hallucination(raw)
-        clean_msg = AIMessage(content=clean)
+            if tools and (not hasattr(response, "tool_calls") or not response.tool_calls):
+                content = response.content if hasattr(response, 'content') else ''
+                if _looks_hallucinated(content):
+                    logger.warning(f"{agent_name} 跳过工具直接编造，强制重试")
+                    retry_msg = SystemMessage(
+                        content=system_prompt + "\n\n【强制指令】必须调用工具获取数据，禁止直接回答。请重新开始。"
+                    )
+                    retry_msgs = [retry_msg] + context_msgs
+                    retry_response = llm_with_tools.invoke(retry_msgs)
+                    retry_response = _execute_tool_calls(retry_response, llm, retry_msg, context_msgs)
+                    if (not hasattr(retry_response, "tool_calls") or not retry_response.tool_calls):
+                        retry_content = retry_response.content if hasattr(retry_response, 'content') else ''
+                        if _looks_hallucinated(retry_content):
+                            logger.error(f"{agent_name} 重试后仍编造，强杀输出")
+                            visited = list(state.get("visited_agents", []))
+                            if agent_name not in visited:
+                                visited.append(agent_name)
+                            next_node = "supervisor" if state.get("analysis_chain") == "active" else END
+                            return {
+                                "messages": [AIMessage(content=(
+                                    ">   **数据获取失败** — MCP 工具重试后仍不可用。\n"
+                                    "> 请稍后重试或检查 MCP 服务。"
+                                ))],
+                                "next_agent": next_node,
+                                "visited_agents": visited,
+                                "analysis_chain": state.get("analysis_chain", ""),
+                            }
+                    response = retry_response
+
+            raw = response.content if hasattr(response, 'content') else str(response)
+            clean = _sanitize_hallucination(raw)
+            clean_msg = AIMessage(content=clean)
 
         logger.info(f"{agent_name} 回复")
 
@@ -348,7 +518,6 @@ def _create_worker_node(
         if agent_name not in visited:
             visited.append(agent_name)
 
-        # 在综合分析链内 → 回归 Supervisor；否则直接结束
         next_node = "supervisor" if state.get("analysis_chain") == "active" else END
 
         return {
@@ -371,15 +540,18 @@ def build_graph() -> StateGraph:
     workflow.add_node(AGENT_NODES["supervisor"], create_supervisor_node())
     workflow.add_node(
         AGENT_NODES["stock_agent"],
-        _create_worker_node("stock_agent", STOCK_AGENT_PROMPT, STOCK_TOOLS + [market_overview_tool, sector_overview_tool], use_rag=False),
+        _create_worker_node("stock_agent", STOCK_AGENT_PROMPT, STOCK_TOOLS + [market_overview_tool, sector_overview_tool],
+                            use_rag=False, prefetch_fn=_prefetch_stock_agent),
     )
     workflow.add_node(
         AGENT_NODES["analysis_agent"],
-        _create_worker_node("analysis_agent", ANALYSIS_AGENT_PROMPT, ANALYSIS_TOOLS, use_rag=False),
+        _create_worker_node("analysis_agent", ANALYSIS_AGENT_PROMPT, ANALYSIS_TOOLS,
+                            use_rag=False, prefetch_fn=_prefetch_analysis_agent),
     )
     workflow.add_node(
         AGENT_NODES["esg_agent"],
-        _create_worker_node("esg_agent", ESG_AGENT_PROMPT, ESG_TOOLS, use_rag=False),
+        _create_worker_node("esg_agent", ESG_AGENT_PROMPT, ESG_TOOLS,
+                            use_rag=False, prefetch_fn=_prefetch_esg_agent),
     )
     workflow.add_node(
         AGENT_NODES["general_agent"],
