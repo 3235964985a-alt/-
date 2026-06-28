@@ -307,7 +307,7 @@ def _create_worker_node(
         # 工具执行（含 LLM 二次回复）
         response = _execute_tool_calls(response, llm, system_msg, context_msgs)
 
-        # 有工具但未调用且检测到编造 → 强制重试
+        # 有工具但未调用且检测到编造 → 强制重试一次
         if tools and (not hasattr(response, "tool_calls") or not response.tool_calls):
             content = response.content if hasattr(response, 'content') else ''
             if _looks_hallucinated(content):
@@ -318,6 +318,24 @@ def _create_worker_node(
                 retry_msgs = [retry_msg] + context_msgs
                 retry_response = llm_with_tools.invoke(retry_msgs)
                 retry_response = _execute_tool_calls(retry_response, llm, retry_msg, context_msgs)
+                # 重试后仍然没调工具且还在编造 → 直接拒绝输出
+                if (not hasattr(retry_response, "tool_calls") or not retry_response.tool_calls):
+                    retry_content = retry_response.content if hasattr(retry_response, 'content') else ''
+                    if _looks_hallucinated(retry_content):
+                        logger.error(f"{agent_name} 重试后仍编造，强杀输出")
+                        visited = list(state.get("visited_agents", []))
+                        if agent_name not in visited:
+                            visited.append(agent_name)
+                        next_node = "supervisor" if state.get("analysis_chain") == "active" else END
+                        return {
+                            "messages": [AIMessage(content=(
+                                ">   **数据获取失败** — MCP 工具重试后仍不可用，Agent 无法获取实时数据。\n"
+                                "> 请检查后端 MCP 服务是否正常，或稍后重试。"
+                            ))],
+                            "next_agent": next_node,
+                            "visited_agents": visited,
+                            "analysis_chain": state.get("analysis_chain", ""),
+                        }
                 response = retry_response
 
         raw = response.content if hasattr(response, 'content') else str(response)
@@ -330,9 +348,12 @@ def _create_worker_node(
         if agent_name not in visited:
             visited.append(agent_name)
 
+        # 在综合分析链内 → 回归 Supervisor；否则直接结束
+        next_node = "supervisor" if state.get("analysis_chain") == "active" else END
+
         return {
             "messages": [clean_msg],
-            "next_agent": END,
+            "next_agent": next_node,
             "visited_agents": visited,
             "analysis_chain": state.get("analysis_chain", ""),
         }
@@ -395,10 +416,12 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # 各Worker → Supervisor 的条件路由（链式：回 Supervisor；非链式：直接 END）
+    # 各Worker → Supervisor 的条件路由
+    # worker 已根据 analysis_chain 决定 next_agent，这里直接转发
     def route_from_worker(state: AgentState) -> Literal["supervisor", "__end__"]:
-        if state.get("analysis_chain") == "active":
-            return state.get("next_agent", "supervisor")
+        nxt = state.get("next_agent", "__end__")
+        if nxt == "supervisor":
+            return "supervisor"
         return "__end__"
 
     for worker_name in ["stock_agent", "analysis_agent", "esg_agent", "general_agent", "news_agent"]:
@@ -574,29 +597,33 @@ def _looks_hallucinated(text: str) -> bool:
     return bool(pattern.search(text))
 
 
-def _sanitize_hallucination(text: str) -> str:
-    """后置防幻觉清理——检测 LLM 编造的历史数据（不误伤 MCP 真实数据）
-
-    仅当检测到明确的训练数据特征时才追加警告。
-    """
+def _detect_hallucination(text: str) -> list:
+    """返回检测到的编造特征列表，不修改原文"""
     import re
-
-    warnings = []
-    # 检测编造模式：精确年份 + 季度财报
+    findings = []
     if re.search(r'2024\s*年(前三季度|三季度单季|上半年|年报|中报)', text):
-        warnings.append(" 检测到'2024年'历史数据，此数据来自训练记忆非实时 MCP，请忽略。")
-
-    # 机构名称 + 调研/目标均价（明确的编造特征）
+        findings.append("编造历史年份(2024)")
     if re.search(r'(海通证券|景顺长城|淡水泉|信达澳亚|交银基金|睿郡基金).*调研|'
                  r'目标均价.*\d+\.?\d*\s*元|'
                  r'机构调研.*\d+\s*家.*(海通|景顺|淡水泉)', text):
-        warnings.append(" 检测到编造的机构调研/目标价数据，非 MCP 实时返回。")
+        findings.append("编造机构调研/目标价")
+    return findings
 
-    if warnings:
-        warning_block = "\n\n>   **发现编造数据**\n" + "\n".join(f"> {w}" for w in warnings)
-        text = warning_block + "\n\n" + text
 
-    return text
+def _sanitize_hallucination(text: str) -> str:
+    """后置防幻觉——检测到编造特征时直接丢弃全文，返回错误摘要。
+
+    只保留 non-hallucinated 的输出。"""
+    findings = _detect_hallucination(text)
+    if not findings:
+        return text
+
+    # 编造内容直接丢弃，用错误摘要替代
+    return (
+        ">   **数据获取失败** — Agent 未调用实时工具，输出了训练记忆中的过时数据。\n"
+        "> 检测到: " + " | ".join(findings) + "\n\n"
+        "请检查 MCP 数据源是否连通，或尝试重新提问。"
+    )
 
 
 def debate_watchlist(stock_codes: List[str]) -> str:
