@@ -55,149 +55,106 @@ def _extract_single_code(text: str) -> str:
 # ---------- Pre-fetch 数据层（先取数据再给LLM总结，不再依赖LLM调工具） ----------
 
 def _prefetch_stock_agent(user_text: str) -> str:
-    """为 stock_agent 预取数据：akshare（本地） + MCP 行情/调研（best-effort）"""
-    code = _extract_single_code(user_text)
-    parts = []
-    errors = []
-
-    if code:
-        # akshare 本地数据（不依赖 MCP Server）
-        try:
-            from .akshare_data import fetch_stock_akshare
-            ak = fetch_stock_akshare(code)
-            info = ak.get("stock_info", {})
-            if info.get("company_name"):
-                parts.append(f"【股票信息】名称: {info['company_name']} | 行业: {info.get('industry','')} | 上市: {info.get('listing_date','')} | 总股本: {info.get('total_shares','')}")
-            fin = ak.get("financials", {}).get("latest", {})
-            if fin:
-                parts.append(f"【最新财务指标】ROE: {fin.get('roe','?')}% | 毛利率: {fin.get('gpm','?')}% | 净利率: {fin.get('npm','?')}% | 负债率: {fin.get('debt_ratio','?')}% | 营收增长: {fin.get('revenue_growth','?')}%")
-            val = ak.get("valuation", {})
-            if val:
-                parts.append(f"【估值】PE: {val.get('pe','?')} | PB: {val.get('pb','?')} | 市值: {val.get('market_cap','?')}")
-            abs_ = ak.get("abstract", {})
-            if abs_:
-                parts.append(f"【最新财报】营收: {abs_.get('revenue','?')} | 净利润: {abs_.get('net_profit','?')} | EPS: {abs_.get('eps','?')}")
-            if not parts:
-                errors.append("akshare 返回空数据")
-                logger.warning("prefetch_stock: akshare returned empty for %s", code)
-        except Exception as e:
-            errors.append(f"akshare 异常: {e}")
-            logger.warning("prefetch_stock: akshare failed for %s: %s", code, e)
-
-    if code:
-        for tool_name in ["stk_market_value", "stk_survey"]:
-            try:
-                val = _call_mcp_tool_sync(tool_name, {"security_code": code})
-                if val:
-                    label = "实时行情" if "market" in tool_name else "机构调研"
-                    parts.append(f"【{label}】{str(val)[:800]}")
-                    logger.info("prefetch_stock: MCP %s OK (%s)", tool_name, code)
-                else:
-                    errors.append(f"MCP {tool_name} 返回空")
-            except Exception as e:
-                errors.append(f"MCP {tool_name} 不可用: {e}")
-                logger.debug("prefetch_stock: MCP %s failed: %s", tool_name, e)
-
-    if not parts and errors:
-        parts.append(f"数据源诊断: {'; '.join(errors)}")
-
-    # 大盘概览（不依赖 MCP，akshare 本地数据）
-    if not code or any(k in user_text for k in ["大盘", "行情", "市场", "指数", "盘面"]):
-        try:
-            parts.append(f"【大盘概览】\n{get_market_overview()[:500]}")
-        except Exception:
-            pass
-
-    # 板块行情
-    if any(k in user_text for k in ["板块", "概念", "行业", "热点"]):
-        try:
-            parts.append(f"【板块行情】\n{get_sector_overview_text()[:500]}")
-        except Exception:
-            pass
-
-    return "\n\n".join(parts)
+    """stock/analysis/esg 共用同一个数据采集结果，各 Agent 看到的数据一致"""
+    return _fetch_all_stock_data(user_text)
 
 
 def _prefetch_analysis_agent(user_text: str) -> str:
-    """为 analysis_agent 预取数据：akshare 财务指标 + MCP DCF/eval（best-effort）"""
-    code = _extract_single_code(user_text)
-    parts = []
-    errors = []
-
-    if code:
-        try:
-            from .akshare_data import fetch_stock_akshare
-            ak = fetch_stock_akshare(code)
-            fin = ak.get("financials", {})
-            for q in fin.get("recent_quarters", []):
-                parts.append(f"财务指标({q.get('date','')}): ROE={q.get('roe','?')}% | ROA={q.get('roa','?')}% | 毛利率={q.get('gpm','?')}% | 净利率={q.get('npm','?')}% | 净利增长={q.get('profit_growth','?')}% | 负债率={q.get('debt_ratio','?')}%")
-            if not fin.get("recent_quarters"):
-                errors.append("akshare 财务指标为空")
-        except Exception as e:
-            errors.append(f"akshare 异常: {e}")
-            logger.warning("prefetch_analysis: akshare failed for %s: %s", code, e)
-
-    if code:
-        for tool_name in ["stk_dcf", "stk_eval"]:
-            try:
-                val = _call_mcp_tool_sync(tool_name, {"security_code": code})
-                if val:
-                    label = "DCF估值" if "dcf" in tool_name else "综合评估"
-                    parts.append(f"【{label}】{str(val)[:800]}")
-                else:
-                    errors.append(f"MCP {tool_name} 返回空")
-            except Exception as e:
-                errors.append(f"MCP {tool_name} 不可用")
-                logger.debug("prefetch_analysis: MCP %s failed: %s", tool_name, e)
-
-    if not parts and errors:
-        parts.append(f"数据源诊断: {'; '.join(errors)}")
-
-    # 筛选类（无股票代码，直接调 MCP 筛选器）
-    filter_kw = ["roe", "roic", "毛利率", "净利率", "股息率", "筛选"]
-    if any(k in user_text for k in filter_kw) and not code:
-        filter_map = {
-            "roe_1y": "stk_eval_filter_by_roe_1y", "roe_3y": "stk_eval_filter_by_roe_3y",
-            "roic_1y": "stk_eval_filter_by_roic_1y", "roic_3y": "stk_eval_filter_by_roic_3y",
-            "gpm_1y": "stk_eval_filter_by_gpm_1y", "gpm_3y": "stk_eval_filter_by_gpm_3y",
-            "npm_1y": "stk_eval_filter_by_npm_1y", "npm_3y": "stk_eval_filter_by_npm_3y",
-            "div_rate": "stk_eval_filter_by_div_rate",
-        }
-        for kw, tool_name in filter_map.items():
-            if kw in user_text:
-                try:
-                    val = _call_mcp_tool_sync(tool_name, {})
-                    if val:
-                        parts.append(f"【筛选结果】{str(val)[:800]}")
-                except Exception:
-                    pass
-
-    return "\n\n".join(parts) if parts else ""
+    """复用 stock 的预取结果"""
+    return _fetch_all_stock_data(user_text)
 
 
 def _prefetch_esg_agent(user_text: str) -> str:
-    """为 esg_agent 预取数据：MCP ESG 评级（纯 MCP，无 akshare 替代）"""
+    """复用 stock 的预取结果"""
+    return _fetch_all_stock_data(user_text)
+
+
+def _fetch_all_stock_data(user_text: str) -> str:
+    """统一数据采集：同步调用 akshare + MCP（best-effort），每个调用都有日志。
+
+    返回：结构化的文本块，供 LLM 直接总结。
+    """
     code = _extract_single_code(user_text)
-    if not code:
-        return ""
-
     parts = []
-    esg_tools = {
-        "miotech_esg_rating": "妙盈科技",
-        "chindices_esg_rating": "华证指数",
-        "syntaogf_esg_rating": "商道融绿",
-    }
-    for tool_name, label in esg_tools.items():
-        try:
-            val = _call_mcp_tool_sync(tool_name, {"security_code": code})
-            if val:
-                parts.append(f"【{label}ESG评级】{str(val)[:600]}")
-            else:
-                parts.append(f"【{label}ESG评级】MCP 返回空")
-        except Exception as e:
-            parts.append(f"【{label}ESG评级】MCP 不可用: {e}")
 
-    return "\n\n".join(parts) if parts else "ESG 数据源（妙盈/华证/商道融绿）均不可达"
+    # ====== 1. AKShare 个股数据（同步，去 ThreadPoolExecutor 吞异常） ======
+    if code:
+        try:
+            from .akshare_data import get_stock_info, get_financial_indicators
+            from .akshare_data import get_financial_abstract, get_valuation_summary
+
+            info = get_stock_info(code) or {}
+            if info.get("company_name"):
+                parts.append(f"【股票信息】名称={info['company_name']} 行业={info.get('industry','')} 上市={info.get('listing_date','')} 总股本={info.get('total_shares','')}")
+                logger.info("prefetch: akshare stock_info OK for %s", code)
+            else:
+                logger.warning("prefetch: akshare stock_info empty for %s", code)
+
+            fin = get_financial_indicators(code) or {}
+            latest = fin.get("latest", {})
+            if latest:
+                parts.append(f"【最新财务指标】ROE={latest.get('roe','?')}% 毛利率={latest.get('gpm','?')}% 净利率={latest.get('npm','?')}% 负债率={latest.get('debt_ratio','?')}% 营收增长={latest.get('revenue_growth','?')}% 净利增长={latest.get('profit_growth','?')}%")
+                logger.info("prefetch: akshare financials OK for %s", code)
+            for q in fin.get("recent_quarters", []):
+                parts.append(f"财务指标({q.get('date','')}): ROE={q.get('roe','?')}% ROA={q.get('roa','?')}% 毛利率={q.get('gpm','?')}% 净利率={q.get('npm','?')}% 净利增长={q.get('profit_growth','?')}% 负债率={q.get('debt_ratio','?')}%")
+
+            val = get_valuation_summary(code) or {}
+            if val:
+                parts.append(f"【估值摘要】PE={val.get('pe','?')} PB={val.get('pb','?')} 市值={val.get('market_cap','?')}")
+                logger.info("prefetch: akshare valuation OK for %s", code)
+
+            abs_ = get_financial_abstract(code) or {}
+            if abs_:
+                parts.append(f"【最新财报】营收={abs_.get('revenue','?')} 净利润={abs_.get('net_profit','?')} EPS={abs_.get('eps','?')}")
+                logger.info("prefetch: akshare abstract OK for %s", code)
+        except Exception as e:
+            logger.error("prefetch: akshare ALL failed for %s: %s", code, e)
+            parts.append(f" AKShare 个股数据采集失败: {e}")
+
+    # ====== 2. MCP 远数据（best-effort） ======
+    if code:
+        mcp_tools = [
+            ("stk_market_value", "实时行情", {"security_code": code}),
+            ("stk_survey", "机构调研", {"security_code": code}),
+            ("stk_dcf", "DCF估值", {"security_code": code}),
+            ("stk_eval", "综合评估", {"security_code": code}),
+            ("miotech_esg_rating", "妙盈ESG", {"security_code": code}),
+            ("chindices_esg_rating", "华证ESG", {"security_code": code}),
+            ("syntaogf_esg_rating", "商道融绿ESG", {"security_code": code}),
+        ]
+        for tool_name, label, args in mcp_tools:
+            try:
+                val = _call_mcp_tool_sync(tool_name, args)
+                if val and len(str(val).strip()) > 5:
+                    parts.append(f"【{label}】{str(val)[:800]}")
+                else:
+                    parts.append(f"【{label}】MCP 返回空")
+            except Exception:
+                parts.append(f"【{label}】MCP 不可达")
+
+    # ====== 3. 大盘/板块（含代码或纯大盘问） ======
+    if not code or any(k in user_text for k in ["大盘", "行情", "市场", "指数", "盘面"]):
+        try:
+            overview = get_market_overview()
+            if overview:
+                parts.append(f"【大盘概览】\n{overview[:500]}")
+                logger.info("prefetch: market_overview OK")
+        except Exception as e:
+            logger.warning("prefetch: market_overview failed: %s", e)
+
+    if any(k in user_text for k in ["板块", "概念", "行业", "热点"]):
+        try:
+            sectors = get_sector_overview_text()
+            if sectors:
+                parts.append(f"【板块行情】\n{sectors[:500]}")
+                logger.info("prefetch: sector_overview OK")
+        except Exception as e:
+            logger.warning("prefetch: sector_overview failed: %s", e)
+
+    result = "\n\n".join(parts)
+    if not result:
+        result = "所有数据源(akshare/MCP)均未返回有效数据，请告知用户当前数据服务不可用，禁止编造。"
+    return result
 
 
 # Import _call_mcp_tool_sync for pre-fetch
