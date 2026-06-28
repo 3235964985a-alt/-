@@ -179,16 +179,16 @@ def _call_newsnow_sync(tool_name: str, arguments: dict) -> str:
 # ---------- LangChain Tool 封装 ----------
 
 class GetSingleNewsInput(BaseModel):
-    source: str = Field(description="新闻源名称，如：知乎、微博、财联社、雪球、华尔街见闻等")
+    source: str = Field(description="新闻源名称。如：B站、知乎、微博、抖音、财联社、雪球、华尔街见闻、贴吧等")
 
 
 class GetMultiNewsInput(BaseModel):
-    sources: str = Field(description="新闻源名称列表，逗号分隔，最多5个。如：财联社,雪球,知乎")
+    sources: str = Field(description="新闻源名称列表，逗号分隔，最多5个。如：B站,财联社,雪球,知乎")
 
 
 class _GetSingleNewsTool(BaseTool):
     name: str = "get_newsnow"
-    description: str = "从指定新闻源获取最新热点新闻。支持的源：知乎、微博、财联社、雪球、华尔街见闻、B站、抖音、今日头条等14+平台。"
+    description: str = "从指定新闻源获取最新热搜新闻。可用源：B站、知乎、微博、抖音、财联社、雪球、华尔街见闻、贴吧、酷安、头条、澎湃、快手等14+平台。"
     args_schema: type = GetSingleNewsInput
 
     def _run(self, source: str) -> str:
